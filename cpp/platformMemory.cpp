@@ -62,12 +62,15 @@ public:
   virtual void idResponse(uint32_t sglId) { portalMemory->sglIdResp(sglId); }
 };
 
+static const char *mtSemName = "/connectal/mtSem";
+
 class MemServerIndication : public MemServerIndicationWrapper {
   MemServerRequestProxy *memServerRequestProxy;
   sem_t *mtSem;
   uint64_t mtCnt;
   void init() {
-    if ((mtSem = sem_open("/connectal/mtSem", O_CREAT, 0644, 1)) == SEM_FAILED)
+    sem_unlink(mtSemName);
+    if ((mtSem = sem_open(mtSemName, O_CREAT | O_EXCL, 0644, 0)) == SEM_FAILED)
       PORTAL_PRINTF("MemServerIndication::init failed to init mtSem\n");
   }
 

@@ -45,6 +45,9 @@ static void dmaManagerOnce(void) {
 }
 #endif
 
+static const char *sglIdSemName = "/connectal/sglIdSem";
+static const char *confSemName = "/connectal/confSem";
+
 void DmaManager_init(DmaManagerPrivate *priv, PortalInternal *sglDevice) {
   memset(priv, 0, sizeof(*priv));
   priv->sglDevice = sglDevice;
@@ -54,11 +57,13 @@ void DmaManager_init(DmaManagerPrivate *priv, PortalInternal *sglDevice) {
   initPortalMemory();
   sem_t *sglIdSem;
   sem_t *confSem;
-  if ((sglIdSem = sem_open("/connectal/sglIdSem", O_CREAT, 0644, 1)) ==
+  sem_unlink(sglIdSemName);
+  if ((sglIdSem = sem_open(sglIdSemName, O_CREAT | O_EXCL, 0644, 0)) ==
       SEM_FAILED) {
     PORTAL_PRINTF("failed to init sglIdSem\n");
   }
-  if ((confSem = sem_open("/connectal/confSem", O_CREAT, 0644, 1)) ==
+  sem_unlink(confSemName);
+  if ((confSem = sem_open(confSemName, O_CREAT | O_EXCL, 0644, 0)) ==
       SEM_FAILED) {
     PORTAL_PRINTF("failed to init confSem\n");
   }

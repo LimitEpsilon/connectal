@@ -18,6 +18,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+#include <cstring>
 #include <monkit.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -103,15 +104,18 @@ public:
 // "r" (0) );
 
 MemcpyIndication *deviceIndication = 0;
+static const char *done_sem_name = "/memcpy/done_sem";
+static const char *memcmp_sem_name = "/memcpy/memcmp_sem";
 
 int main(int argc, const char **argv) {
-
-  if ((done_sem = sem_open("/memcpy/done_sem", O_CREAT, 0644, 1)) ==
+  sem_unlink(done_sem_name);
+  if ((done_sem = sem_open(done_sem_name, O_CREAT | O_EXCL, 0644, 0)) ==
       SEM_FAILED) {
     fprintf(stderr, "failed to init done_sem\n");
     exit(1);
   }
-  if ((memcmp_sem = sem_open("/memcpy/memcmp_sem", O_CREAT, 0644, 1)) ==
+  sem_unlink(memcmp_sem_name);
+  if ((memcmp_sem = sem_open(memcmp_sem_name, O_CREAT | O_EXCL, 0644, 0)) ==
       SEM_FAILED) {
     fprintf(stderr, "failed to init memcmp_sem\n");
     exit(1);
