@@ -19,6 +19,16 @@
 # DEALINGS IN THE SOFTWARE.
 #
 
+OS := $(shell uname -s)
+
+ifeq ($(OS),Darwin)
+$(info Building for macos)
+export SED=gsed
+else
+$(info Building for Linux)
+export SED=sed
+endif
+
 CONNECTALDIR=$(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 include $(CONNECTALDIR)/Makefile.version
 
@@ -176,7 +186,7 @@ android.exe bsim_exe ubuntu.exe exe: gentarget
 	+make -C $(PROJECTDIR) --no-print-directory $@
 
 ZYNQ_MPSOC=$(shell jq -r .options.ZYNQ_MPSOC < $(CONNECTALDIR)/boardinfo/$(BOARD).json)
-PCIEGEN=$(shell jq -r .options.need_pcie < $(CONNECTALDIR)/boardinfo/$(BOARD).json | sed 's/.*gen\([123]\).*/\1/')
+PCIEGEN=$(shell jq -r .options.need_pcie < $(CONNECTALDIR)/boardinfo/$(BOARD).json | $(SED) 's/.*gen\([123]\).*/\1/')
 NEED_XILINX_PCIE_ac701=$(PCIEGEN)
 NEED_XILINX_PCIE_ac701g2=$(PCIEGEN)
 NEED_XILINX_PCIE_kc160g2=$(PCIEGEN)
