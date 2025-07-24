@@ -314,9 +314,9 @@ static void initPortalHardwareOnce(void) {
     argv[ind++] = (char *)"run -all; quit -f";
 #endif
     if (bindir)
-      sprintf(exename, "%s/%s", bindir, exetype);
+      snprintf(exename, MAX_PATH - 1, "%s/%s", bindir, exetype);
     else
-      sprintf(exename, "%s", exetype);
+      snprintf(exename, MAX_PATH - 1, "%s", exetype);
     argv[0] = exename;
     if (trace_portal)
       fprintf(stderr, "[%s:%d] %s %s *******\n", __FUNCTION__, __LINE__,

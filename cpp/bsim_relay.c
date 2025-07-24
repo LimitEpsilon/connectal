@@ -19,82 +19,82 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <fcntl.h>
-#include <sys/select.h>
-#include <sys/mman.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/select.h>
 
-#include "sock_utils.h"
 #include "portal.h"
+#include "sock_utils.h"
 
-static void memdump(unsigned char *p, int len, char *title)
-{
-int i;
+static void memdump(unsigned char *p, int len, char *title) {
+  int i;
 
-    i = 0;
-    while (len > 0) {
-        if (!(i & 0xf)) {
-            if (i > 0)
-                fprintf(stderr, "\n");
-            fprintf(stderr, "%s: ",title);
-        }
-        fprintf(stderr, "%02x ", *p++);
-        i++;
-        len--;
+  i = 0;
+  while (len > 0) {
+    if (!(i & 0xf)) {
+      if (i > 0)
+        fprintf(stderr, "\n");
+      fprintf(stderr, "%s: ", title);
     }
-    fprintf(stderr, "\n");
+    fprintf(stderr, "%02x ", *p++);
+    i++;
+    len--;
+  }
+  fprintf(stderr, "\n");
 }
 
 static char devicename[1000];
-int main(int argc, char *argv[])
-{
-    struct memrequest req;
-    static PortalInternal pint;
-    int rc;
-    char *bashpid = getenv("CONNECTAL_MODULE_NAME");
+int main(int argc, char *argv[]) {
+  struct memrequest req;
+  static PortalInternal pint;
+  int rc;
+  char *bashpid = getenv("CONNECTAL_MODULE_NAME");
 
-    if (!bashpid) {
-        fprintf(stderr, "bsim_relay: define environment variable CONNECTAL_MODULE_NAME\n");
-        return -1;
+  if (!bashpid) {
+    fprintf(stderr,
+            "bsim_relay: define environment variable CONNECTAL_MODULE_NAME\n");
+    return -1;
+  }
+  snprintf(devicename, 1000 - 1, "/dev/%s", bashpid);
+  int fd = open(devicename, O_RDWR);
+  if (fd == -1) {
+    fprintf(stderr, "bsimhost: '%s' not found\n", devicename);
+    return -1;
+  }
+  fprintf(stderr, "[%s:%d] trying to connect to bsim\n", __FUNCTION__,
+          __LINE__);
+  connect_to_bsim();
+  fprintf(stderr, "[%s:%d] opened bsim\n", __FUNCTION__, __LINE__);
+  while ((rc = read(fd, &req, sizeof(req)))) {
+    struct memresponse rv;
+    if (rc == -1) {
+      struct timeval timeout;
+      timeout.tv_sec = 0;
+      timeout.tv_usec = 10000;
+      select(0, NULL, NULL, NULL, &timeout);
+      continue;
     }
-    sprintf(devicename, "/dev/%s", bashpid);
-    int fd = open(devicename, O_RDWR);
-    if (fd == -1) {
-        fprintf(stderr, "bsimhost: '%s' not found\n", devicename);
-        return -1;
+    if (rc != sizeof(req)) {
+      fprintf(stderr, "[%s:%d] rc = %d.\n", __FUNCTION__, __LINE__, rc);
+      memdump((unsigned char *)&req, sizeof(req), "RX");
     }
-fprintf(stderr, "[%s:%d] trying to connect to bsim\n", __FUNCTION__, __LINE__);
-    connect_to_bsim();
-fprintf(stderr, "[%s:%d] opened bsim\n", __FUNCTION__, __LINE__);
-    while ((rc = read(fd, &req, sizeof(req)))) {
-        struct memresponse rv;
-        if (rc == -1) {
-            struct timeval timeout;
-            timeout.tv_sec = 0;
-            timeout.tv_usec = 10000;
-            select(0, NULL, NULL, NULL, &timeout);
-            continue;
-        }
-        if (rc != sizeof(req)) {
-            fprintf(stderr, "[%s:%d] rc = %d.\n", __FUNCTION__, __LINE__, rc);
-            memdump((unsigned char *)&req, sizeof(req), "RX");
-        }
-        rv.portal = req.portal;
-        pint.fpga_number = req.portal;
-        if (req.portal == MAGIC_PORTAL_FOR_SENDING_FD) {
-fprintf(stderr, "[%s:%d] sending fd %d\n", __FUNCTION__, __LINE__, req.data_or_tag);
-            transportBsim.writefd(&pint, &req.addr, req.data_or_tag);
-            rv.data = 0xdead;
-            write(fd, &rv, sizeof(rv));
-        }
-        else if (req.write_flag)
-            transportBsim.write(&pint, &req.addr, req.data_or_tag);
-        else {
-            rv.data = transportBsim.read(&pint, &req.addr);
-            write(fd, &rv, sizeof(rv));
-        }
+    rv.portal = req.portal;
+    pint.fpga_number = req.portal;
+    if (req.portal == MAGIC_PORTAL_FOR_SENDING_FD) {
+      fprintf(stderr, "[%s:%d] sending fd %d\n", __FUNCTION__, __LINE__,
+              req.data_or_tag);
+      transportBsim.writefd(&pint, &req.addr, req.data_or_tag);
+      rv.data = 0xdead;
+      write(fd, &rv, sizeof(rv));
+    } else if (req.write_flag)
+      transportBsim.write(&pint, &req.addr, req.data_or_tag);
+    else {
+      rv.data = transportBsim.read(&pint, &req.addr);
+      write(fd, &rv, sizeof(rv));
     }
-    return 0;
+  }
+  return 0;
 }
