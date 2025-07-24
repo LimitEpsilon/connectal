@@ -28,15 +28,19 @@
 extern "C" {
 #endif
 
+#ifndef MAX_FIELD
+#define MAX_FIELD 4096
+#endif
+
 static int trace_json; // = 1;
 void connectalJsonEncode(char *datap, void *binarydata,
                          ConnectalMethodJsonInfo *info, int json_arg_vector) {
   ConnectalParamJsonInfo *iparam = info->param;
   char *data = (char *)datap;
   if (!json_arg_vector)
-    data += snprintf(data, 4096 - 1, "{\"name\":\"%s\"", info->name);
+    data += snprintf(data, MAX_FIELD - 1, "{\"name\":\"%s\"", info->name);
   else
-    data += snprintf(data, 4096 - 1, "[\"%s\"", info->name);
+    data += snprintf(data, MAX_FIELD - 1, "[\"%s\"", info->name);
   while (iparam->name) {
     uint8_t tmp8;
     uint16_t tmp16;
@@ -48,46 +52,46 @@ void connectalJsonEncode(char *datap, void *binarydata,
     int64_t stmp64;
     int tmpint;
     if (!json_arg_vector)
-      data += snprintf(data, 4096 - 1, ",\"%s\":", iparam->name);
+      data += snprintf(data, MAX_FIELD - 1, ",\"%s\":", iparam->name);
     else
-      data += snprintf(data, 4096 - 1, ", ");
+      data += snprintf(data, MAX_FIELD - 1, ", ");
     switch (iparam->itype) {
     case ITYPE_int8_t:
       stmp8 = *(int8_t *)((unsigned long)binarydata + iparam->offset);
-      data += snprintf(data, 4096 - 1, "%d", stmp8);
+      data += snprintf(data, MAX_FIELD - 1, "%d", stmp8);
       break;
     case ITYPE_int16_t:
       stmp16 = *(int16_t *)((unsigned long)binarydata + iparam->offset);
-      data += snprintf(data, 4096 - 1, "%d", stmp16);
+      data += snprintf(data, MAX_FIELD - 1, "%d", stmp16);
       break;
     case ITYPE_int:
     case ITYPE_int32_t:
       stmp32 = *(int32_t *)((unsigned long)binarydata + iparam->offset);
-      data += snprintf(data, 4096 - 1, "%d", stmp32);
+      data += snprintf(data, MAX_FIELD - 1, "%d", stmp32);
       break;
     case ITYPE_int64_t:
       stmp64 = *(int64_t *)((unsigned long)binarydata + iparam->offset);
-      data += snprintf(data, 4096 - 1, "%lld", (long long)stmp64);
+      data += snprintf(data, MAX_FIELD - 1, "%lld", (long long)stmp64);
       break;
     case ITYPE_uint8_t:
       tmp8 = *(uint8_t *)((unsigned long)binarydata + iparam->offset);
-      data += snprintf(data, 4096 - 1, "%d", tmp8);
+      data += snprintf(data, MAX_FIELD - 1, "%d", tmp8);
       break;
     case ITYPE_uint16_t:
       tmp16 = *(uint16_t *)((unsigned long)binarydata + iparam->offset);
-      data += snprintf(data, 4096 - 1, "%d", tmp16);
+      data += snprintf(data, MAX_FIELD - 1, "%d", tmp16);
       break;
     case ITYPE_uint32_t:
       tmp32 = *(uint32_t *)((unsigned long)binarydata + iparam->offset);
-      data += snprintf(data, 4096 - 1, "%d", tmp32);
+      data += snprintf(data, MAX_FIELD - 1, "%d", tmp32);
       break;
     case ITYPE_uint64_t:
       tmp64 = *(uint64_t *)((unsigned long)binarydata + iparam->offset);
-      data += snprintf(data, 4096 - 1, "%lld", (unsigned long long)tmp64);
+      data += snprintf(data, MAX_FIELD - 1, "%lld", (unsigned long long)tmp64);
       break;
     case ITYPE_SpecialTypeForSendingFd:
       tmpint = *(int *)((unsigned long)binarydata + iparam->offset);
-      data += snprintf(data, 4096 - 1, "%d", tmpint);
+      data += snprintf(data, MAX_FIELD - 1, "%d", tmpint);
       break;
     default:
       fprintf(stderr, "%x type %d\n",
@@ -97,9 +101,9 @@ void connectalJsonEncode(char *datap, void *binarydata,
     iparam++;
   }
   if (!json_arg_vector)
-    data += snprintf(data, 4096 - 1, "}");
+    data += snprintf(data, MAX_FIELD - 1, "}");
   else
-    data += snprintf(data, 4096 - 1, "]");
+    data += snprintf(data, MAX_FIELD - 1, "]");
   if (trace_json)
     fprintf(stderr, "[%s] num %d message '%s'\n", __FUNCTION__, iparam->offset,
             (char *)datap);

@@ -24,9 +24,11 @@ OS := $(shell uname -s)
 ifeq ($(OS),Darwin)
 $(info Building for macos)
 export SED=gsed
+STRICT=--nonstrict
 else
 $(info Building for Linux)
 export SED=sed
+STRICT=
 endif
 
 CONNECTALDIR=$(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
@@ -273,7 +275,7 @@ gentarget:: process_autotop generate_altera_custom
 ifeq ($(USE_PRINTF),1)
 	$(CONNECTALDIR)/scripts/preprocess_trace.py $(PROJECTDIR) $(BSVFILES)
 endif
-	$(Q)$(CONNECTALDIR)/scripts/makefilegen.py -B$(BOARD) --project-dir $(PROJECTDIR) \
+	$(Q)$(CONNECTALDIR)/scripts/makefilegen.py $(STRICT) -B$(BOARD) --project-dir $(PROJECTDIR) \
 	$(foreach interfaces, $(INTERFACES), -interfaces $(interfaces)) \
 	$(foreach f, $(CPPFILES), --source $f) \
 	$(foreach f, $(ALL_CPPFILES2), --source2 $f) \

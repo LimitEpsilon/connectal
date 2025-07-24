@@ -89,7 +89,7 @@ argparser.add_argument('--cachedir', help='Cache directory for fpgamake to use',
 argparser.add_argument('--nocache', help='dont use buildcache with fpgamake', action='store_true')
 argparser.add_argument('-v', '--verbose', help='Display verbose information messages', action='store_true')
 argparser.add_argument(      '--dump_map', help='List of portals passed to pcieflat for PCIe trace debug info')
-argparser.add_argument('--nonstrict', help='If nonstrict, pass -Wall to gcc, otherwise -Werror', default=True, action='store_true')
+argparser.add_argument('--nonstrict', help='If nonstrict, pass -Wall to gcc, otherwise -Werror', default=False, action='store_true')
 argparser.add_argument('--prtop', help='Filename of previously synthesized top level for partial reconfiguration', default=None)
 argparser.add_argument('--prvariant', help='name of a variant for partial reconfiguration', action='append', default=[])
 argparser.add_argument('--reconfig', help='partial reconfig module names', action='append', default=[])
