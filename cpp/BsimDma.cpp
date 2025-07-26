@@ -39,7 +39,7 @@ typedef struct {
     int size_accum;
 } DMAINFO[MAX_DMA_IDS];
 static DMAINFO dma_info[MAX_DMA_PORTS];
-static int dma_trace ;//= 1;
+static int dma_trace = 0;
 
 #define BUFFER_CHECK \
     if (!dma_info[id][pref].buffer || offset >= dma_info[id][pref].buffer_len) { \

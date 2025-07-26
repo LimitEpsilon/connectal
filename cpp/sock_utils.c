@@ -36,7 +36,7 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 
-static int trace_socket ;//= 1;
+static int trace_socket = 0;
 
 const char *bluesimSocketName()
 {

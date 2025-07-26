@@ -1,0 +1,74 @@
+import RWBramCore::*;
+import RegFile::*;
+import FIFO::*;
+import GetPut::*;
+import SpecialFIFOs::*;
+
+
+interface RenameTable#(numeric type numTags, type dataT);
+   method ActionValue#(Bit#(TLog#(numTags))) writeEntry(dataT d);
+   method Action readEntry(Bit#(TLog#(numTags)) tag);
+   method ActionValue#(dataT) readResp;
+   method Action invalidEntry(Bit#(TLog#(numTags)) tag);
+endinterface
+
+
+module mkRenameTable(RenameTable#(numTags, dataT)) provisos(
+   NumAlias#(TExp#(TLog#(numTags)), numTags),
+   Bits#(dataT, a__)
+   );
+   Reg#(Bit#(TLog#(numTags))) initCnt <- mkReg(0);
+   Reg#(Bool) init <- mkReg(False);
+   
+   FIFO#(Bit#(TLog#(numTags))) freeTagQ <- mkSizedFIFO(valueOf(numTags));
+   
+   `ifdef USE_BRAM
+   RWBramCore#(Bit#(TLog#(numTags)), dataT) tb <- mkRWBramCore;
+   `else
+   FIFO#(dataT) readRespQ <- mkPipelineFIFO;
+   RegFile#(Bit#(TLog#(numTags)), dataT) tb <- mkRegFileFull;
+   `endif
+   
+   rule initialize (!init);
+      initCnt <= initCnt + 1;
+      freeTagQ.enq(initCnt);
+      if (initCnt == fromInteger(valueOf(numTags) - 1))
+         init <= True;
+   endrule
+                   
+   
+   method ActionValue#(Bit#(TLog#(numTags))) writeEntry(dataT d) if (init);
+      let freeTag = freeTagQ.first;
+      freeTagQ.deq;
+      `ifdef USE_BRAM
+      tb.wrReq(freeTag, d);
+      `else
+      tb.upd(freeTag, d);
+      `endif
+      return freeTag;
+   endmethod
+   
+   method Action readEntry(Bit#(TLog#(numTags)) tag);
+      `ifdef USE_BRAM
+      tb.rdReq(tag);
+      `else
+      let data = tb.sub(tag);
+      readRespQ.enq(data);
+      `endif
+   endmethod
+
+   method ActionValue#(dataT) readResp;
+      `ifdef USE_BRAM
+      tb.deqRdResp;
+      return tb.rdResp;
+      `else
+      let data <- toGet(readRespQ).get;
+      return data;
+      `endif
+   endmethod
+   
+   method Action invalidEntry(Bit#(TLog#(numTags)) tag) if (init); 
+      freeTagQ.enq(tag);
+   endmethod   
+endmodule
+   
