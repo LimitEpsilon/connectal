@@ -10,14 +10,13 @@ function Bit#(TAdd#(n,n)) multiply_unsigned( Bit#(n) a, Bit#(n) b );
     UInt#(TAdd#(n,n)) product_uint = zeroExtend(a_uint) * zeroExtend(b_uint);
     return pack( product_uint );
 endfunction
-                 
+
 function Bit#(TAdd#(n,n)) multiply_signed( Bit#(n) a, Bit#(n) b );
     Int#(n) a_int = unpack(a);
     Int#(n) b_int = unpack(b);
     Int#(TAdd#(n,n)) product_int = signExtend(a_int) * signExtend(b_int);
     return pack( product_int );
 endfunction
-
 
 // Multiplier Interface
 interface Multiplier#( numeric type n );
@@ -28,7 +27,7 @@ endinterface
 // Folded multiplier by repeated addition
 module mkFoldedMultiplier( Multiplier#(n) )
 	provisos(Add#(1, a__, n)); // make sure n >= 1
-    
+
     // You can use these registers or create your own if you want
     Reg#(Bit#(n)) a <- mkRegU();
     Reg#(Bit#(n)) b <- mkRegU();
@@ -45,7 +44,7 @@ module mkFoldedMultiplier( Multiplier#(n) )
         tp <= sum[fromInteger(valueOf(n)):1];
         i <= i + 1;
     endrule
-   
+
     method Action start(Bit#(n) aIn, Bit#(n) bIn) if (!busy);
         a <= aIn;
         b <= bIn;
@@ -71,28 +70,28 @@ typedef struct{
 // Pipelined multiplier by repeated addition
 module mkPipelinedMultiplier( Multiplier#(n) )
    provisos(Add#(1, a__, n)); // make sure n >= 1
-   
+
    Vector#(n, FIFO#(MultiStage#(n))) fifos <- replicateM(mkPipelineFIFO);
-   
+
    function MultiStage#(n) multiStep(MultiStage#(n) v);
       let a = v.a;
       let b = v.b;
       let prod = v.prod;
       let tp = v.tp;
-         
+
       Bit#(n) m = (a[0] == 0) ? 0 : b;
       a = a >> 1; // equivalent to a[i]==0 on the previous line, and no shifting.
-         
+
       Bit#(TAdd#(n,1)) sum = zeroExtend(m) + zeroExtend(tp);
       prod = {sum[0], prod[fromInteger(valueOf(n)-1):1]};
       tp = sum[fromInteger(valueOf(n)):1];
-         
+
       return MultiStage{a: a,
                         b: b,
                         prod: prod,
                         tp: tp};
    endfunction
-   
+
    for (Integer i = 0; i < valueOf(n) - 1; i = i + 1) begin
       rule doMulStep;
          let v = fifos[i].first;
@@ -106,7 +105,7 @@ module mkPipelinedMultiplier( Multiplier#(n) )
       let b = bIn;
       Bit#(n) prod = 0;
       Bit#(n) tp = 0;
-   
+
       fifos[0].enq(multiStep(MultiStage{a: a,
                                         b: b,
                                         prod: prod,
@@ -132,30 +131,30 @@ module mkRadix4UnsignedMultiplier(Multiplier#(n))
             NumAlias#(n, TExp#(TLog#(n))), // n is power of 2
             Add#(2, b__, n)
             ); // make sure n >= 2
-   
+
    Vector#(TDiv#(n,2), FIFO#(Radix4Unsigned#(n))) fifos <- replicateM(mkPipelineFIFO);
-   
+
    function Radix4Unsigned#(n) multiStep(Radix4Unsigned#(n) v);
       let prod = v.prod;
-   
+
       let multiplicand_X_1 = v.multiplicand_X_1;
       let multiplicand_X_2 = v.multiplicand_X_2;
       let multiplicand_X_3 = v.multiplicand_X_3;
-   
+
       Bit#(TAdd#(n,2)) pp = {2'b0, prod[2*valueOf(n)-1:valueOf(n)]};
-   
+
       case (prod[1:0])
          0: pp = pp + 0;
          1: pp = pp + multiplicand_X_1;
          2: pp = pp + multiplicand_X_2;
          3: pp = pp + multiplicand_X_3;
       endcase
-      
+
       v.prod = {1'b0, pp, prod[valueOf(n)-1:2]};
-         
+
       return v;
    endfunction
-   
+
    for (Integer i = 0; i < valueOf(n)/2 - 1; i = i + 1) begin
       rule doMulStep;
          let v = fifos[i].first;
@@ -168,7 +167,7 @@ module mkRadix4UnsignedMultiplier(Multiplier#(n))
    method Action start(Bit#(n) aIn, Bit#(n) bIn);
       let multiplicand = aIn;
       let multiplier = bIn;
-   
+
       Bit#(TAdd#(n,2)) multiplicand_X_1 = {0, multiplicand};
       Bit#(TAdd#(n,2)) multiplicand_X_2 = zeroExtend({multiplicand, 1'b0});
       Bit#(TAdd#(n,2)) multiplicand_X_3 = multiplicand_X_1 + multiplicand_X_2;
@@ -202,17 +201,17 @@ module mkRadix4SignedMultiplier(Multiplier#(n))
             Add#(1, c__, TAdd#(n, n)),
             Add#(TAdd#(n, 1), d__, c__)
             ); // make sure n >= 2
-   
+
    Vector#(TDiv#(n,2), FIFO#(Radix4Signed#(n))) fifos <- replicateM(mkPipelineFIFO);
-   
+
    function Radix4Signed#(n) multiStep(Radix4Signed#(n) v);
       let prod = v.prod;
-   
+
       Bit#(TAdd#(n,1)) mult_sx = signExtend(v.mc);
       Bit#(TAdd#(n,1)) mult_x_2 = {v.mc,1'b0};
-   
+
       Bit#(TAdd#(n,1)) pp = prod[2*valueOf(n):valueOf(n)];
-   
+
       case ( {prod[1:0],v.lostbit} )
          3'b001: pp = pp + mult_sx;
          3'b010: pp = pp + mult_sx;
@@ -221,13 +220,13 @@ module mkRadix4SignedMultiplier(Multiplier#(n))
          3'b101: pp = pp - mult_sx;
          3'b110: pp = pp - mult_sx;
       endcase
-   
-      v.lostbit = (v.prod)[1];      
+
+      v.lostbit = (v.prod)[1];
       v.prod = {msb(pp), msb(pp),pp,prod[valueOf(n)-1:2]};
-         
+
       return v;
    endfunction
-   
+
    for (Integer i = 0; i < valueOf(n)/2 - 1; i = i + 1) begin
       rule doMulStep;
          let v = fifos[i].first;
@@ -240,7 +239,7 @@ module mkRadix4SignedMultiplier(Multiplier#(n))
    method Action start(Bit#(n) aIn, Bit#(n) bIn);
       let mc = aIn;
       let mp = bIn;
-   
+
       // $display( "start : mc = %b, mp = %b \t", aIn, bIn);
       fifos[0].enq(multiStep(Radix4Signed{mc: mc,
                                           lostbit: 0,
