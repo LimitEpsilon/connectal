@@ -4,13 +4,13 @@ H2S_INTERFACES = DdrAws:Ddr3TestIndication
 
 BSVFILES= \
     DdrAws.bsv\
-    Axi4.bsv
+    Axi4Pins.bsv
 
 CPPFILES= testddr3.cpp
 
 
 PIN_TYPE = Axi4
-PIN_TYPE_INCLUDE = Axi4
+PIN_TYPE_INCLUDE = Axi4Pins
 AUTOTOP = --interface pins:DdrAws.ddr3
 
 CONNECTALFLAGS += -D AWSF1_DDR_A

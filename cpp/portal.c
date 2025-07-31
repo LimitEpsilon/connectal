@@ -46,14 +46,14 @@
 
 #ifdef __APPLE__ // hack for debugging
 #include <libproc.h>
-#else
+#endif
+
 #include "drivers/portalmem/portalmem.h" // PA_MALLOC
 #if defined(ZYNQ) || defined(__riscv__)
 #include "drivers/zynqportal/zynqportal.h"
 #else
 #include "drivers/pcieportal/pcieportal.h" // BNOC_TRACE
 #endif
-#endif // !__APPLE__
 
 int simulator_dump_vcd = 0;
 const char *simulator_vcd_name = "dump.vcd";
