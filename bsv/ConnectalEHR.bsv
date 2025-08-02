@@ -22,58 +22,57 @@
 
 
 /*
-Comments: This EHR design generates the following scheduling constraints (forall i):
-forall j >= i, r[i] < w[j]
-forall j < i, r[i] > w[j]
-forall j > i, w[i] < w[j]
-w[i] conflicts with w[i]
-forall j, r[i] is conflict free with r[j]
+  Comments: This EHR design generates the following scheduling constraints (forall i):
+  forall j >= i, r[i] < w[j]
+  forall j < i, r[i] > w[j]
+  forall j > i, w[i] < w[j]
+  w[i] conflicts with w[i]
+  forall j, r[i] is conflict free with r[j]
 */
 
 import Vector::*;
 import RWire::*;
+import RevertingVirtualReg::*;
 
-typedef  Vector#(n, Reg#(t)) Ehr#(numeric type n, type t);
+typedef Vector#(n, Reg#(t)) Ehr#(numeric type n, type t);
 
-module mkEhr#(t init)(Ehr#(n, t)) provisos(Bits#(t, tSz));
+module mkEhr#(t init) (Ehr#(n, t)) provisos(Bits#(t, tSz));
   Vector#(n, RWire#(t)) lat <- replicateM(mkUnsafeRWire);
 
-  Vector#(n, Reg#(Bool)) dummy2 <- replicateM(mkReg(True));
+  Vector#(n, Reg#(Bool)) dummy <- replicateM(mkRevertingVirtualReg(False));
 
   Reg#(t) rl <- mkReg(init);
 
-  rule canon;
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule canonicalize;
     t upd = rl;
-    for(Integer i = 0; i < valueOf(n); i = i + 1)
-      if(lat[i].wget matches tagged Valid .x)
-        upd = x;
+    for (Integer i = 0; i < valueOf(n); i = i + 1)
+      if (lat[i].wget matches tagged Valid .x) upd = x;
+
     rl <= upd;
   endrule
 
-   function Reg#(t) genEhr(Integer i);
-      return (interface Reg;
-	 method Action _write(t x);
-	    lat[i].wset(x);
-	    dummy2[i] <= True;
-         endmethod
+  function Reg#(t) genEhr(Integer i) =
+    interface Reg;
+	    method Action _write(t x);
+	      lat[i].wset(x);
+	      dummy[i] <= False; // force scheduling
+      endmethod
 
-	 method t _read;
-	    t upd = rl;
-	    Bool yes = True;
-	    for(Integer j = i; j < valueOf(n); j = j + 1)
-	       yes = yes && dummy2[j];
-	    for(Integer j = 0; j < i; j = j + 1)
-	       begin
-                  if(lat[j].wget matches tagged Valid .x)
-                     upd = x;
-	       end
-	    return yes? upd : ?;
-         endmethod
-	 endinterface);
-   endfunction
-   
-   Ehr#(n, t) r = genWith(genEhr);
+      method t _read;
+	      t upd = rl;
+	      for (Integer j = 0; j < i; j = j + 1)
+          if (lat[j].wget matches tagged Valid .x) upd = x;
 
-   return r;
+	      for (Integer j = i; j < valueOf(n); j = j + 1)
+	        if (dummy[j]) upd = init; // force scheduling
+
+        return upd;
+      endmethod
+	  endinterface;
+
+  Ehr#(n, t) r = genWith(genEhr);
+
+  return r;
 endmodule
 

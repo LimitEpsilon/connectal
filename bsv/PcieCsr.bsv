@@ -195,10 +195,10 @@ module mkPcieControlAndStatusRegs(PcieControlAndStatusRegs);
 	  if (oneHotDecode774[798-774] == 1) data = tlpTraceBramResponseSlice(pcieTraceBramResponse, 9);
 	  if (oneHotDecode774[799-774] == 1) data = tlpTraceBramResponseSlice(pcieTraceBramResponse, 10);
 	  if (oneHotDecode774[800-774] == 1) data = tlpTraceBramResponseSlice(pcieTraceBramResponse, 11);
-   	  if (oneHotDecode774[801-774] == 1) data = (changeFifo.notEmpty()) ? (changeFifo.first()[31:0]) : 0;
-   	  if (oneHotDecode774[802-774] == 1) data = (changeFifo.notEmpty()) ? (changeFifo.first()[63:32]) : 0;
+    if (oneHotDecode774[801-774] == 1) data = (changeFifo.notEmpty()) ? (changeFifo.first()[31:0]) : 0;
+    if (oneHotDecode774[802-774] == 1) data = (changeFifo.notEmpty()) ? (changeFifo.first()[63:32]) : 0;
 
-         //******************************** msix_base has to match CONFIG.MXIx_PBA_Offset in scripts/connectal-synth-pcie.tcl
+    //******************************** msix_base has to match CONFIG.MXIx_PBA_Offset in scripts/connectal-synth-pcie.tcl
 	  // 16-bit MSIx pending bit field
 	  if (oneHotDecode992[992-992] == 1) data = '0;                               // PBA structure (low)
 	  if (oneHotDecode992[993-992] == 1) data = '0;                               // PBA structure (high)
