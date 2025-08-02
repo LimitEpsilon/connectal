@@ -108,7 +108,7 @@ module mkPcieTop #(Clock pci_sys_clk_p, Clock pci_sys_clk_n, `SYS_CLK_PARAM Rese
 module mkPcieTop #(Clock pcie_refclk_p, Clock osc_50_b3b, Reset pcie_perst_n) (PcieTop#(`PinType));
    PcieHostTop host <- mkPcieHostTop(pcie_refclk_p, osc_50_b3b, pcie_perst_n);
 `endif
-   Vector#(NumberOfUserTiles,ConnectalTop#(`PinType)) tile <- replicateM(mkConnectalTop(
+   Vector#(NumberOfUserTiles,ConnectalTop#(`PinType)) tile <- replicateM(mkConnectalTop( // hack for special case of NumberOfUserTiles == 1
 `ifdef IMPORT_HOSTIF // no synthesis boundary
       host,
 `else                // enables synthesis boundary

@@ -114,7 +114,7 @@ int main(int argc, const char **argv)
     device->getStateDbg();
     //uint64_t beats = hostMemServerIndication->getMemoryTraffic(ChannelType_Read);
     uint64_t beats = 0;
-    fprintf(stderr, "   beats: %"PRIx64"\n", beats);
+    fprintf(stderr, "   beats: %" PRIx64"\n", beats);
     //hostMemServerRequest->stateDbg(ChannelType_Read);
     platformStatistics();
   }

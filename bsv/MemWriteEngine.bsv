@@ -242,13 +242,13 @@ module mkMemWriteChannelPipelined#(Integer bufferSizeBytes, Integer channelNumbe
    FIFOF#(MemRequest)           writeReqFifo <- mkFIFOF();
    FIFOF#(MemData#(userWidth)) writeDataFifo <- mkFIFOF();
 
-   // Reg#(Bool)              clientInFlight <- mkReg(False);
-   // Reg#(Bool)              clientBursts <- mkReg(False);
+   Reg#(Bool)              clientInFlight <- mkReg(False);
+   Reg#(Bool)              clientBursts <- mkReg(False);
    ConfigCounter#(16)      clientAvail <- mkConfigCounter(0);
-   // Reg#(MemengineCmd)      clientStart <- mkReg(unpack(0));
+   Reg#(MemengineCmd)      clientStart <- mkReg(unpack(0));
    FIFOF#(Bool)             clientFinished <- mkSizedFIFOF(valueOf(cmdQDepth));
    FIFOF#(MemengineCmd)    clientCommand <- mkSizedFIFOF(valueOf(cmdQDepth));
-   // Count#(Bit#(32))        clientCycles     <- mkCount(0);
+   Count#(Bit#(32))        clientCycles     <- mkCount(0);
    FIFOF#(Bit#(32)) clientCyclesFifoStart <- mkSizedFIFOF(valueOf(cmdQDepth));
    FIFOF#(MemRequestCycles) clientCyclesFifo <- mkFIFOF();
    FIFOF#(Bit#(userWidth)) dataBuffer <- mkSizedBRAMFIFOF(bufferSizeBeats);
@@ -396,7 +396,7 @@ module mkMemWriteChannelPipelined#(Integer bufferSizeBytes, Integer channelNumbe
 	     clientFinished.enq(True);
          `ifdef MEMENGINE_REQUEST_CYCLES
 	     $display("cycles %d req_tag %d clientCycles = %d", cycles-startCycle, req_tag, clientCycles);
-	     clientCyclesFifo.enq(MemRequestCycles { tag: req_tag, cycles: cyles - startCycle});
+	     clientCyclesFifo.enq(MemRequestCycles { tag: req_tag, cycles: cycles - startCycle});
          `endif
       end
       //$display("writeDone %d %d", channelNumber, last);
