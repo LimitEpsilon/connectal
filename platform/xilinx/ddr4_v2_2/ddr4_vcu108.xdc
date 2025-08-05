@@ -1,5 +1,5 @@
-#Ports related to the System
-#DDR4 C1 PINS
+# Ports related to the System
+# DDR4 C1 PINS
 set_property PACKAGE_PIN E33      [get_ports "*c0_ddr4_act_n"] ;
 set_property PACKAGE_PIN C30      [get_ports "*c0_ddr4_adr[0]"] ;
 set_property PACKAGE_PIN A31      [get_ports "*c0_ddr4_adr[10]"] ;

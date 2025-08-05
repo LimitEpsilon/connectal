@@ -41,6 +41,7 @@ xsim
 vc709
 vc707
 vc707g2
+vcu108
 usage_statistics_webtalk.*
 vivado_pid*
 nfsume
@@ -66,3 +67,4 @@ driverversion.h
 *.o
 *.d
 *.mod
+out

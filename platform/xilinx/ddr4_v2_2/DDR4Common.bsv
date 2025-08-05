@@ -117,13 +117,13 @@ interface DDR4_Pins#(`DDR4_PRM_DCL);
   method Bit#(cke_width) cke;
   (* prefix = "", result = "ddr4_odt" *)
   method Bit#(odt_width) odt;
-  (* prefix = "", result = "ddr4_cs_n" *)      
+  (* prefix = "", result = "ddr4_cs_n" *)
   method Bit#(cs_width) cs_n;
-  (* prefix = "", result = "ddr4_ck_t" *)      
+  (* prefix = "", result = "ddr4_ck_t" *)
   method Bit#(ck_width) ck_t;
-  (* prefix = "", result = "ddr4_ck_c" *)      
+  (* prefix = "", result = "ddr4_ck_c" *)
   method Bit#(ck_width) ck_c;
-  (* prefix = "", result = "ddr4_reset_n" *)      
+  (* prefix = "", result = "ddr4_reset_n" *)
   method Bit#(1) reset_n;
   (* prefix = "ddr4_dm_dbi_n" *)
   interface Inout#(Bit#(dm_width)) dm_dbi_n;
@@ -167,14 +167,14 @@ interface VDDR4_User_Xilinx#(`DDR4_PRM_DCL);
   method    Bool   app_rd_data_end;
   method    Bool   app_rd_data_valid;
   method    Bool   app_rdy;
-  method    Bool   app_wdf_rdy;   
+  method    Bool   app_wdf_rdy;
 endinterface
 
 interface VDDR4_Controller_Xilinx#(`DDR4_PRM_DCL);
   (* prefix = "" *)
   interface DDR4_Pins#(`DDR4_PRM)  ddr4;
   (* prefix = "" *)
-  interface VDDR4_User_Xilinx#(`DDR4_PRM)  user;   
+  interface VDDR4_User_Xilinx#(`DDR4_PRM)  user;
 endinterface
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -283,7 +283,7 @@ module mkXilinxDDR4Controller#(VDDR4_Controller_Xilinx#(`DDR4_PRM) ddr4Ifc, DDR4
       rReadsPending.down;
     endrule
   endrule
-  
+
 
   ////////////////////////////////////////////////////////////////////////////////
   /// Interface Connections / Methods
@@ -295,7 +295,7 @@ module mkXilinxDDR4Controller#(VDDR4_Controller_Xilinx#(`DDR4_PRM) ddr4Ifc, DDR4
     method init_done  = initialized;
     method Action request(Bit#(ddr4addrsize) addr, Bit#(ddr4besize) mask, Bit#(ddr4datasize) data);
       Bool rnw = (mask == 0);
-      let req = DDR4Request {rnw: rnw, byteen: mask, address: addr, data: data };
+      let req = DDR4Request {rnw: rnw, byteen: mask, address: addr, data: data};
       fRequest.enq(req);
     endmethod
 

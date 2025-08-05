@@ -432,7 +432,7 @@ void *portalMmap(int fd, size_t size)
     fput(fmem);
     return retptr;
 #else      ///////////////////////// userspace version
-    void *mapped = mmap(0, size, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_SHARED, fd, 0);
+    void *mapped = mmap(0, size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
     if (mapped == MAP_FAILED)
       fprintf(stderr, "ERROR: portalMmap fd=%d size=%ld mapped=%p\n", fd, (long)size, mapped);
     return mapped;

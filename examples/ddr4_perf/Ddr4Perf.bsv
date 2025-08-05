@@ -71,67 +71,67 @@ endinterface
 
 
 module mkDdr4Perf#(HostInterface host, Ddr4PerfIndication indication)(Ddr4Perf);
-   
+
    Vector#(2,FIFO#(DDRRequest)) reqs <- replicateM(mkFIFO());
    Vector#(2,FIFO#(DDRResponse)) resps <- replicateM(mkFIFO());
    Vector#(2,DDR4Client) ddr_clients = zipWith(toClient, reqs, resps);
-   
-   `ifdef SIMULATION
+
+`ifdef SIMULATION
    Vector#(2, DDR4_User_VCU108) ddr4_ctrl_users <- replicateM(mkDDR4Simulator);
    zipWithM_(mkConnection, ddr_clients, ddr4_ctrl_users);
-   `else 
+`else
    Clock curr_clk <- exposeCurrentClock();
    Reset curr_rst_n <- exposeCurrentReset();
-   
-   
+
    // DDR4 C1
-   `ifdef VirtexUltrascalePlus // vcu118
+`ifdef VirtexUltrascalePlus // vcu118
    let sys_clk1 = host.tsys_clk1_250mhz;
-   `else // vcu108
+`else // vcu108
    let sys_clk1 = host.tsys_clk1_300mhz;
-   `endif
+`endif
+
    let sys_rst1 <- mkAsyncResetFromCR(20, sys_clk1);
 
    DDR4_Controller_VCU108 ddr4_ctrl_0 <- mkDDR4Controller_VCU108(defaultValue, clocked_by sys_clk1, reset_by sys_rst1);
-      
+
    Clock ddr4clk0 = ddr4_ctrl_0.user.clock;
    Reset ddr4rstn0 = ddr4_ctrl_0.user.reset_n;
-   
+
    let ddr_cli_300mhz_0 <- mkDDR4ClientSync(ddr_clients[0], curr_clk, curr_rst_n, ddr4clk0, ddr4rstn0);
    mkConnection(ddr_cli_300mhz_0, ddr4_ctrl_0.user);
-   
+
    // DDR4 C2
-   `ifdef VirtexUltrascalePlus // vcu118
+`ifdef VirtexUltrascalePlus // vcu118
    let sys_clk2 = host.tsys_clk2_250mhz;
-   `else
+`else
    let sys_clk2 = host.tsys_clk1_300mhz_buf;
-   `endif
+`endif
+
    let sys_rst2 <- mkAsyncResetFromCR(20, sys_clk2);
-      
+
    DDR4_Controller_VCU108 ddr4_ctrl_1 <- mkDDR4Controller_VCU108(defaultValue, clocked_by sys_clk2, reset_by sys_rst2);
-      
+
    Clock ddr4clk1 = ddr4_ctrl_1.user.clock;
    Reset ddr4rstn1 = ddr4_ctrl_1.user.reset_n;
-   
+
    let ddr_cli_300mhz_1 <- mkDDR4ClientSync(ddr_clients[1], curr_clk, curr_rst_n, ddr4clk1, ddr4rstn1);
    mkConnection(ddr_cli_300mhz_1, ddr4_ctrl_1.user);
-   `endif
-   
+`endif // SIMULATION
+
    Reg#(Bool) started <- mkReg(False);
    Reg#(Bit#(32)) cycleCnt <- mkReg(0);
-   
+
    rule increCycle (started);
       cycleCnt <= cycleCnt + 1;
    endrule
 
-   
    Vector#(2,FIFO#(Bit#(32))) cntRdMaxQ <- replicateM(mkFIFO());
    Vector#(2,FIFO#(Bit#(32))) respMaxQ <- replicateM(mkFIFO());
    Vector#(2,FIFO#(Bit#(32))) cntWrMaxQ <- replicateM(mkFIFO());
-   
+
    Vector#(2,FIFO#(Tuple2#(Bit#(32),Bit#(32)))) readDoneQs <- replicateM(mkFIFO());
    Vector#(2, FIFO#(Bit#(32))) writeDoneQs <- replicateM(mkFIFO());
-   
+
    Reg#(Bit#(5)) strideReg <- mkReg(0);
 
    for (Integer i = 0; i < 2; i = i + 1) begin
@@ -148,16 +148,22 @@ module mkDdr4Perf#(HostInterface host, Ddr4PerfIndication indication)(Ddr4Perf);
             cntRdMaxQ[i].deq();
          end
       endrule
-      
+
       Reg#(Bit#(32)) respCnt <- mkReg(0);
       Reg#(Bit#(32)) missCnt <- mkReg(0);
-      
+
       rule doResp;
          let respMax = respMaxQ[i].first;
          if ( respCnt < respMax ) begin
             respCnt <= respCnt + 1;
             let d <- toGet(resps[i]).get();
-            if ( truncate(d) != respCnt ) begin
+            Bit#(512) dataout = ?;
+            for (Integer i = 0; i < 512; i = i + 32) begin
+               Bit#(4) ib = fromInteger(i/32);
+               Bit#(32) dataout_i = truncate({respCnt, ib});
+               dataout[i+31 : i] = dataout_i;
+            end
+            if ( truncate(d) != dataout ) begin
                missCnt <= missCnt + 1;
             end
             $display("(%t)Get Val[%d] from %d = %h", $time, respCnt, i, d);
@@ -169,15 +175,21 @@ module mkDdr4Perf#(HostInterface host, Ddr4PerfIndication indication)(Ddr4Perf);
             respMaxQ[i].deq();
          end
       endrule
-      
 
       Reg#(Bit#(32)) cntWr <- mkReg(0);
-      
+
       rule doWrReq;
          let cntWrMax = cntWrMaxQ[i].first();
          $display("(%t)Write Req[%d] cntWr = %d, cntWrMax = %d", $time, i, cntWr, cntWrMax);
+         Bit#(512) datain = ?;
+         for (Integer i = 0; i < 512; i = i + 32) begin
+            Bit#(4) ib = fromInteger(i/32);
+            Bit#(32) datain_i = truncate({cntWr, ib});
+            datain[i+31 : i] = datain_i;
+         end
+
          if ( cntWr < cntWrMax ) begin
-            reqs[i].enq(DDRRequest{address: extend(cntWr<<(3+strideReg)), writeen: -1, datain:extend(cntWr)});
+            reqs[i].enq(DDRRequest{address: extend(cntWr<<(3+strideReg)), writeen: -1, datain:extend(datain)});
             cntWr <= cntWr + 1;
          end
          else begin
@@ -187,22 +199,20 @@ module mkDdr4Perf#(HostInterface host, Ddr4PerfIndication indication)(Ddr4Perf);
          end
       endrule
    end
-         
+
    rule doRdDone;
       let rdDone_0 <- toGet(readDoneQs[0]).get();
       let rdDone_1 <- toGet(readDoneQs[1]).get();
       indication.readDone(tpl_1(rdDone_0),tpl_2(rdDone_0),tpl_1(rdDone_1),tpl_2(rdDone_1));
    endrule
-   
+
    rule doWrDone;
       let wrDone_0 <- toGet(writeDoneQs[0]).get();
       let wrDone_1 <- toGet(writeDoneQs[1]).get();
       indication.writeDone(wrDone_0,wrDone_1);
    endrule
-   
-      
-      
-   interface Ddr4PerfRequest request;   
+
+   interface Ddr4PerfRequest request;
       method Action startReadDram(Bit#(64) numCL, Bit#(32) stride);
          $display("(%t)Read Req numCL = %h", $time, numCL);
          cycleCnt <= 0;
@@ -213,7 +223,7 @@ module mkDdr4Perf#(HostInterface host, Ddr4PerfIndication indication)(Ddr4Perf);
          cntRdMaxQ[1].enq(truncate(numCL));
          respMaxQ[1].enq(truncate(numCL));
       endmethod
-      
+
       method Action startWriteDram(Bit#(64) numCL, Bit#(32) stride);
          $display("(%t)Write Req numCL = %h", $time, numCL);
          cycleCnt <= 0;
@@ -224,13 +234,13 @@ module mkDdr4Perf#(HostInterface host, Ddr4PerfIndication indication)(Ddr4Perf);
       endmethod
    endinterface
 
-   interface Top_Pins pins;      
+   interface Top_Pins pins;
       `ifndef SIMULATION
       interface DDR4_Pins_Dual_VCU108 pins_ddr4;
          interface pins_c0 = ddr4_ctrl_0.ddr4;
          interface pins_c1 = ddr4_ctrl_1.ddr4;
-      endinterface      
+      endinterface
       `endif
    endinterface
-   
+
 endmodule

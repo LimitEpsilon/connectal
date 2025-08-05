@@ -27,7 +27,7 @@ public:
     fprintf(stderr, "Read Benchmark BW = %.02lfGB/s\n", (2*numCL*CL_SZ)/(4.0*cycles));
     sem_post(&read_sem);
   }
-  
+
   Ddr4PerfIndication(unsigned int id) : Ddr4PerfIndicationWrapper(id){}
 };
 
@@ -56,9 +56,10 @@ int main(int argc, const char **argv){
   fprintf(stderr, "FPGA STARTS\n");
 #endif
 
+  // hitCount = ⌊2 ^ (stride + lg(numCL) - 25)⌋
   device->startWriteDram(numCL, stride);
   sem_wait(&write_sem);
-  
+
   device->startReadDram(numCL, stride);
   sem_wait(&read_sem);
 
