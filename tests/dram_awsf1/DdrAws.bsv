@@ -75,9 +75,9 @@ module mkDdrAws#(Ddr3TestIndication ind)(DdrAws);
     flying <= False;
     ind.readDone(id,
       resp[31:0],resp[63:32],resp[95:64],resp[127:96],
-	    resp[159:128],resp[191:160],resp[223:192],resp[255:224],
-	    resp[287:256],resp[319:288],resp[351:320],resp[383:352],
-	    resp[415:384],resp[447:416],resp[479:448],resp[511:480]
+      resp[159:128],resp[191:160],resp[223:192],resp[255:224],
+      resp[287:256],resp[319:288],resp[351:320],resp[383:352],
+      resp[415:384],resp[447:416],resp[479:448],resp[511:480]
     );
   endrule
 
