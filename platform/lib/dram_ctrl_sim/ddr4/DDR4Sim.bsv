@@ -7,10 +7,10 @@ import GetPut::*;
 
 import DDR4Controller::*;
 import DDR4Common::*;
+import DRAMControllerTypes::*;
 
-typedef Bit#(28) DDR4Address; // Use 8 banks (64 byte reads), each bank depth = 256MB / 8B = 32M = 2 ^ 25
-typedef Bit#(80) ByteEn;
-typedef Bit#(640) DDR4Data; // 2 DDR4 interfaces (c0, c1), with 5 banks each, each bank width 8 bytes
+// DDR4Address = 28 bits, Use 8 banks (64 byte reads), each bank depth = 256MB / 8B = 32M = 2 ^ 25
+// DDR4Data = 640, 2 DDR4 interfaces (c0, c1), with 5 banks each, each bank width 8 bytes
 
 Bool debug = False;
 
@@ -37,7 +37,7 @@ module mkDDR4Simulator(DDR4_User_VCU108);
   interface reset_n = user_reset_n;
   method Bool init_done = True;
 
-  method Action request(DDR4Address addr, ByteEn writeen, DDR4Data datain);
+  method Action request(Bit#(28) addr, Bit#(TDiv#(DDR4DataSz, 8)) writeen, DDR4Data datain);
     if (debug) $display("%m, ddr req %h, %b, %h", addr, writeen, datain);
     if (addr[2:0] != 0) begin
       $display("DD4Sim: Need to preprocess accesses to DRAM to be 64-byte aligned, aborting...\n");

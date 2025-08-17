@@ -1,8 +1,10 @@
 import ClientServer::*;
 import Connectable::*;
 
-typedef Bit#(64) DDR4Address;
-typedef Bit#(640) DDR4Data;
+typedef 64 DDR4AddrSz;
+typedef Bit#(DDR4AddrSz) DDR4Address;
+typedef 640 DDR4DataSz;
+typedef Bit#(DDR4DataSz) DDR4Data;
 
 // DDR3 Request
 // Used for both reads and writes.
@@ -18,27 +20,26 @@ typedef Bit#(640) DDR4Data;
 //  address contains the address to write to
 //  datain contains the data to be written.
 typedef struct {
-    // writeen: Enable writing.
-    // Set the ith bit of writeen to 1 to write the ith byte of datain to the
-    // ith byte of data at the given address.
-    // If writeen is 0, this is a read request, and a response is returned.
-    // If writeen is not 0, this is a write request, and no response is
-    // returned.
-    Bit#(80) writeen;
+  // writeen: Enable writing.
+  // Set the ith bit of writeen to 1 to write the ith byte of datain to the
+  // ith byte of data at the given address.
+  // If writeen is 0, this is a read request, and a response is returned.
+  // If writeen is not 0, this is a write request, and no response is
+  // returned.
+  Bit#(TDiv#(DDR4DataSz, 8)) writeen;
 
-    // Address to read to or write from.
-    // The DDR3 is 64 bit word addressed, but in bursts of 8 64 bit words.
-    // The address should always be a multiple of 8 (bottom 3 bits 0),
-    // otherwise strange things will happen.
-    // For example: address 0 refers to the first 8 64 bit words in memory.
-    //              address 4 refers to the second 8 64 bit words in memory.
-   DDR4Address address;
+  // Address to read to or write from.
+  // The DDR3 is 64 bit word addressed, but in bursts of 8 64 bit words.
+  // The address should always be a multiple of 8 (bottom 3 bits 0),
+  // otherwise strange things will happen.
+  // For example: address 0 refers to the first 8 64 bit words in memory.
+  //              address 4 refers to the second 8 64 bit words in memory.
+  DDR4Address address;
 
-
-    // Data to write.
-    // For read requests this is ignored.
-    // Only those bytes with corresponding bit set in writeen will be written.
-   DDR4Data datain;
+  // Data to write.
+  // For read requests this is ignored.
+  // Only those bytes with corresponding bit set in writeen will be written.
+  DDR4Data datain;
 } DDRRequest deriving(Bits, Eq, FShow);
 
 // DDR2 Response.
@@ -49,21 +50,3 @@ typedef Bit#(640) DDRResponse;
 typedef Client#(DDRRequest, DDRResponse) DDR4Client;
 typedef Server#(DDRRequest, DDRResponse) DDR4Server;
 
-// typedef struct {
-//    //Bool rnw;
-//    Bit#(7) nBytes;
-//    //Bit#(7) firstNbytes;
-//    //Bool oneCmd;
-//    Bit#(64) addr;
-//    Bit#(512) data;
-//    Bit#(64) mask0;
-//    Bit#(64) mask1;
-//    //Bit#(64) mask1;
-//    } DRAMWrRequest deriving (Bits, Eq);
-
-
-
-// typedef struct {
-//    Bit#(7) nBytes;
-//    Bit#(64) addr;
-//    } DRAMRdRequest deriving (Bits, Eq);

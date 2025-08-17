@@ -2,6 +2,20 @@ import Vector::*;
 import Connectable::*;
 import GetPut::*;
 import ClientServer::*;
+import Memory::*;
+
+import DRAMController::*;
+import DRAMControllerTypes::*;
+import DDR4Controller::*;
+import DDR4Common::*;
+`ifdef SIMULATION
+import DDR4Sim::*;
+`else
+import Clocks          :: *;
+import DefaultValue    :: *;
+`endif
+import HostInterface::*;
+import ClientServerHelper::*;
 
 import Types::*;
 import CMemTypes::*;
@@ -12,12 +26,42 @@ import IMemory::*;
 import DMemory::*;
 import Gpu::*;
 
-interface ConnectalWrapper;
-  interface ConnectalProcRequest connectProc;
+module deriveDDR4Client#(MemoryClient#(a, d) c) (DDR4Client)
+  provisos (
+    Add#(TAdd#(a, 3), _1, DDR4AddrSz),
+    Add#(d, _2, DDR4DataSz),
+    Add#(TDiv#(d, 8), _3, TDiv#(DDR4DataSz, 8))
+  );
+  interface Get request;
+    method ActionValue#(DDRRequest) get;
+      let req <- c.request.get;
+      DDR4Address address = extend({req.address, 3'b0});
+      Bit#(TDiv#(DDR4DataSz, 8)) writeen = req.write ? extend(req.byteen) : 0;
+      DDR4Data data = extend(req.data);
+      return DDRRequest {writeen: writeen, address: address, datain: data};
+    endmethod
+  endinterface
+
+  interface Put response;
+    method Action put(DDRResponse resp);
+      c.response.put(MemoryResponse {data: truncate(resp)});
+    endmethod
+  endinterface
+endmodule
+
+interface Top_Pins;
+  `ifndef SIMULATION
+  interface DDR4_Pins_Dual_VCU108 pins_ddr4;
+  `endif
 endinterface
 
-module [Module] mkConnectalWrapper#(ConnectalProcIndication ind) (ConnectalWrapper);
-  Proc m <- mkProc();
+interface ConnectalWrapper;
+  interface ConnectalProcRequest connectProc;
+  interface Top_Pins pins;
+endinterface
+
+module mkConnectalWrapper#(HostInterface host, ConnectalProcIndication ind) (ConnectalWrapper);
+  Proc m <- mkProc;
   let iMem <- mkIMemory;
   let dMem <- mkDMemory;
   Reg#(Maybe#(Addr)) startpc <- mkReg(tagged Invalid);
@@ -25,7 +69,7 @@ module [Module] mkConnectalWrapper#(ConnectalProcIndication ind) (ConnectalWrapp
   mkConnection(iMem.iMemServer, m.iMemClient);
   mkConnection(dMem.dMemServer, m.dMemClient);
 
-  rule relayMessage;
+  rule relay_message;
     let mess <- m.cpuToHost;
     ind.sendMessage(pack(mess));
   endrule

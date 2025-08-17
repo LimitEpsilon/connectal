@@ -30,4 +30,3 @@ typedef TAdd#(MemHeight, MemWidth) PhysAddrSz;
 typedef 16 IMemAddrSz;
 typedef Bit#(IMemAddrSz) IMemAddr;
 
-

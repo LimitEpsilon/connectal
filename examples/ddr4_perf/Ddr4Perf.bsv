@@ -45,14 +45,11 @@ import GetPut::*;
 import ClientServerHelper::*;
 import DRAMControllerTypes::*;
 
-
 interface Top_Pins;
    `ifndef SIMULATION
    interface DDR4_Pins_Dual_VCU108 pins_ddr4;
    `endif
 endinterface
-
-
 
 interface Ddr4PerfRequest;
    method Action startWriteDram(Bit#(64) numCL, Bit#(32) stride);
