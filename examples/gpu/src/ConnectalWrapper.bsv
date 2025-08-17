@@ -22,8 +22,8 @@ import CMemTypes::*;
 import ProcTypes::*;
 import Ifc::*;
 
+import MemInit::*;
 import IMemory::*;
-import DMemory::*;
 import Gpu::*;
 
 module deriveDDR4Client#(MemoryClient#(a, d) c) (DDR4Client)
@@ -62,19 +62,23 @@ endinterface
 
 module mkConnectalWrapper#(HostInterface host, ConnectalProcIndication ind) (ConnectalWrapper);
   Proc m <- mkProc;
+  let ddrClient <- deriveDDR4Client(m.dMemClient);
   let iMem <- mkIMemory;
-  let dMem <- mkDMemory;
   Reg#(Maybe#(Addr)) startpc <- mkReg(tagged Invalid);
 
   mkConnection(iMem.iMemServer, m.iMemClient);
-  mkConnection(dMem.dMemServer, m.dMemClient);
+`ifdef SIMULATION
+  DDR4_User_VCU108 ddrServer <- mkDDR4Simulator;
+  let ddrInit <- mkMemInitDDR(ddrServer);
+  mkConnection(ddrClient, ddrServer);
+`endif
 
   rule relay_message;
     let mess <- m.cpuToHost;
     ind.sendMessage(pack(mess));
   endrule
 
-  rule signal_done (iMem.init.done && dMem.init.done && isValid(startpc));
+  rule signal_done (iMem.init.done && ddrInit.done && isValid(startpc));
     m.hostToCpu(fromMaybe(?, startpc));
     startpc <= tagged Invalid;
   endrule
@@ -84,7 +88,7 @@ module mkConnectalWrapper#(HostInterface host, ConnectalProcIndication ind) (Con
       let ld = MemInitLoad {addr: extend(addr), data: data};
       let e = last ? tagged InitDone : tagged InitLoad ld;
       iMem.init.request.put(e);
-      dMem.init.request.put(e);
+      ddrInit.request.put(e);
       if (last)
         startpc <= tagged Valid pc;
       else
