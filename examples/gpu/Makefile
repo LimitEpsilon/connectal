@@ -21,7 +21,7 @@ BSVPATH += / \
 CPPFILES += \
 	main.cpp
 
-#CONNECTALFLAGS += --mainclockperiod=20
+CONNECTALFLAGS += --mainclockperiod=8
 
 # for DDR
 CONNECTALFLAGS += -D IMPORT_HOSTIF -D XILINX_SYS_CLK
