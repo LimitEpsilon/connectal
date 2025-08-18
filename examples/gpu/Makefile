@@ -16,10 +16,9 @@ CPPFILES += \
 OS := $(shell uname -s)
 
 ifeq ($(OS),Darwin)
-CONNECTALFLAGS += --cxxflags="-lelf -I/opt/homebrew/include/libelf -I/opt/homebrew/include -L/opt/homebrew/lib"
-else
-CONNECTALFLAGS += --cxxflags="-lelf"
+CONNECTALFLAGS += --cxxflags="-I/opt/homebrew/include/libelf -I/opt/homebrew/include -L/opt/homebrew/lib"
 endif
+CONNECTALFLAGS += --clib="elf"
 
 TNUM = 4
 WNUM = 8
