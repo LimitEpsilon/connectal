@@ -10,20 +10,21 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 */
 
-import Types::*;
 import Vector::*;
 import FIFOF::*;
+import SpecialFIFOs::*;
 import GetPut::*;
 import ClientServer::*;
 import Memory::*;
-import VectorMem::*;
+
+import Types::*;
 import CMemTypes::*;
+import VectorMem::*;
 import RegFile::*;
 import MemInit::*;
 
 interface DMemory;
-  interface Put#(MemoryRequest#(MemHeight, PhysDataSz)) request;
-  interface Get#(MemoryResponse#(PhysDataSz)) response;
+  interface MemoryServer#(MemHeight, PhysDataSz) dMemServer;
   interface MemInitIfc init;
 endinterface
 
@@ -41,9 +42,9 @@ endfunction
 
 (* synthesize *)
 module mkDMemoryServer(MemoryServer#(MemHeight, PhysDataSz));
-	// In simulation we always init memory from a fixed VMH file (for speed)
-	RegFile#(Bit#(MemHeight), Bit#(PhysDataSz)) mem <- mkRegFileFull;
-	FIFOF#(Bit#(PhysDataSz)) responses <- mkLFIFOF;
+  // In simulation we always init memory from a fixed VMH file (for speed)
+  RegFile#(Bit#(MemHeight), Bit#(PhysDataSz)) mem <- mkRegFileFull;
+  FIFOF#(Bit#(PhysDataSz)) responses <- mkLFIFOF;
 
   interface Put request;
     method Action put(MemoryRequest#(MemHeight, PhysDataSz) req);
@@ -69,36 +70,37 @@ module mkDMemory(DMemory);
   MemoryServer#(MemHeight, PhysDataSz) mem <- mkDMemoryServer;
 	MemInitIfc memInit <- mkMemInitDRAM(mem);
 
-	interface Put request;
-	  method put if (memInit.done) = mem.request.put;
-	endinterface
-	interface Get response;
-	  method get if (memInit.done) = mem.response.get;
-	endinterface
-  interface MemInitIfc init = memInit;
+  interface dMemServer = mem;
+  interface init = memInit;
 endmodule
 
 typedef VecMemoryRequest#(n, PhysAddrSz, TDiv#(DataSz, 8)) MemReq#(numeric type n);
 typedef VecMemoryResponse#(n, TDiv#(DataSz, 8)) MemResp#(numeric type n);
 
-interface VectorDMemory#(numeric type n);
+interface DMemoryRouter#(numeric type n);
   interface Put#(MemReq#(n)) request;
   interface Get#(MemResp#(n)) response;
-  interface MemInitIfc init;
+  interface MemoryClient#(MemHeight, PhysDataSz) dMemClient;
 endinterface
 
 (* synthesize *)
-module mkVectorDMemory(VectorDMemory#(ThreadNum));
-  let m <- mkDMemory;
-  VecMemoryServer#(ThreadNum, PhysAddrSz, TDiv#(DataSz, 8)) s <- mkVecMemoryServer(
+module mkDMemoryRouter(DMemoryRouter#(ThreadNum));
+  FIFOF#(MemoryRequest#(MemHeight, PhysDataSz)) reqs <- mkBypassFIFOF;
+  FIFOF#(MemoryResponse#(PhysDataSz)) resps <- mkBypassFIFOF;
+
+  let m =
     interface MemoryServer;
-      interface request = m.request;
-      interface response = m.response;
-    endinterface
-  );
+      interface request = toPut(reqs);
+      interface response = toGet(resps);
+    endinterface;
+
+  let s <- mkVecMemoryServer(m);
 
   interface request = s.request;
   interface response = s.response;
-  interface init = m.init;
+  interface MemoryClient dMemClient;
+    interface request = toGet(reqs);
+    interface response = toPut(resps);
+  endinterface
 endmodule
 

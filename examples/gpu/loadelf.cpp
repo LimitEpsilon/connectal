@@ -23,8 +23,6 @@
 // writing it back out to the output file.
 
 // 1 Gigabyte size
-// #define MAX_MEM_SIZE (((uint64_t) 0x400) * ((uint64_t) 0x400) * ((uint64_t)
-// 0x400))
 #define MAX_MEM_SIZE ((uint64_t)0x90000000)
 
 static uint8_t *mem_buf = NULL;
@@ -279,19 +277,7 @@ static void write_mem_hex_file(ConnectalProcRequestProxy *proc, sem_t *sem,
 
 // ================================================================
 
-static void print_usage(FILE *fp, int argc, char *argv[]) {
-  fprintf(fp, "Usage:\n");
-  fprintf(fp, "    %s  --help\n", argv[0]);
-  fprintf(fp, "    %s  <ELF filename>  <mem hex filename>\n", argv[0]);
-  fprintf(fp, "Reads ELF file and writes a Verilog Hex Memory image file\n");
-  fprintf(fp, "ELF file should have addresses within this range:\n");
-  fprintf(fp, "<  Max: 0x%8" PRIx64 "\n", MAX_MEM_ADDR_256MB);
-  fprintf(fp, ">= Min: 0x%8" PRIx64 "\n", MIN_MEM_ADDR_256MB);
-}
-
-// ================================================================
-
-int load_elf(ConnectalProcRequestProxy *proc, sem_t *sem, const char *name) {
+void load_elf(ConnectalProcRequestProxy *proc, sem_t *sem, const char *name) {
   mem_buf = (uint8_t *)malloc(sizeof(uint8_t) * MAX_MEM_SIZE);
   if (mem_buf == NULL) {
     fprintf(stderr, "Could not allocate mem_buf of size %lu bytes\n",

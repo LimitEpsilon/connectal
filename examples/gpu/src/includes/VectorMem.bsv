@@ -228,11 +228,3 @@ endmodule
 //   VecMemoryServer#(n, a, d) ifc
 // ) provisos (Log#(a, la), Log#(b, lb));
 
-// TODO:: module mkBurstMemoryServer(
-// Given a stream of sorted MemoryRequest#(a, d) and given a memory that
-// supports burst read/writes of (m * d) bits (i.e. MemoryServer#(a, md)),
-// detect memory requests that fits within a burst.
-// If it is a write, use the byteen field of MemoryRequest#(a, m * d)
-// to select the valid write data
-// ) provisos (Mul#(m, d, md));
-

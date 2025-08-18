@@ -613,19 +613,19 @@ endmodule
 module mkProc(Proc);
   let core <- mkCore;
   // IF
-  let iMem <- mkIMemory;
+  let iMem <- mkIMemoryRouter;
   // MEM
-  let dMem <- mkVectorDMemory;
+  let dMem <- mkDMemoryRouter;
   // CSR
   let csrf <- mkCsrFile;
   // SCHED
   let scheduler <- mkScheduler;
   Reg#(Addr) startpc <- mkReg(0);
-  FIFOF#(Bit#(8)) putchars <- mkBypassFIFOF;
-  FIFOF#(void) error <- mkBypassFIFOF;
-  FIFOF#(void) done <- mkBypassFIFOF;
+  Reg#(Bool) started <- mkReg(False);
 
-  Bool memReady = iMem.init.done() && dMem.init.done();
+  FIFOF#(Bit#(8)) putchars <- mkGFIFOF(False, True);
+  FIFOF#(void) error <- mkGFIFOF(False, True);
+  FIFOF#(void) done <- mkGFIFOF(False, True);
 
   (* fire_when_enabled *)
   rule processIMem;
@@ -693,7 +693,7 @@ module mkProc(Proc);
   endrule
 
   (* fire_when_enabled *)
-  rule start_csr(!csrf.started && memReady);
+  rule start_csr(!csrf.started && started);
     csrf.start;
     let dummy = Warp {wid: 1, pc: 0, mask: 0};
     let req = SchedReq {warp: dummy, f: fnWSPAWN, v1: 2, v2: startpc};
@@ -733,12 +733,12 @@ module mkProc(Proc);
     end
   endmethod
 
-  method Action hostToCpu(Bit#(PhysAddrSz) addr, Data data, Addr pc, Bool last) if (!memReady);
-    let ld = MemInitLoad {addr: extend(addr), data: data};
-    let e = last ? tagged InitDone : tagged InitLoad ld;
-    iMem.init.request.put(e);
-    dMem.init.request.put(e);
-    if (last) startpc <= pc;
+  method Action hostToCpu(Addr pc) if (!started);
+    startpc <= pc;
+    started <= True;
   endmethod
+
+  interface iMemClient = iMem.iMemClient;
+  interface dMemClient = dMem.dMemClient;
 endmodule
 

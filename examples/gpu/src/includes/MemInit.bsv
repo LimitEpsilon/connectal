@@ -2,6 +2,9 @@ import GetPut::*;
 import BRAM::*;
 import Memory::*;
 
+import DDR4Common::*;
+import DDR4Controller::*;
+
 import Types::*;
 import CMemTypes::*;
 import RegFile::*;
@@ -76,6 +79,34 @@ module mkMemInitDRAM#(MemoryServer#(MemHeight, PhysDataSz) mem) (MemInitIfc);
               data: extend(l.data) << {shamt, 3'b0}
             };
             mem.request.put(req);
+          end
+        end
+
+        tagged InitDone: begin
+          initialized <= True;
+        end
+      endcase
+    endmethod
+  endinterface
+
+  method Bool done() = initialized;
+
+endmodule
+
+module mkMemInitDDR#(DDR4_User_VCU108 mem) (MemInitIfc);
+  Reg#(Bool) initialized <- mkReg(False);
+
+  interface Put request;
+    method Action put(MemInit x) if (!initialized);
+      case (x) matches
+        tagged InitLoad .l: begin
+          Bit#(TSub#(AddrSz, PhysAddrSz)) upper = l.addr[31 : valueOf(PhysAddrSz)];
+          if (upper == 0) begin
+            Bit#(MemWidth) shamt = l.addr[valueOf(MemWidth)-1:0];
+            Bit#(28) address = {truncate(l.addr >> valueOf(MemWidth)), 3'b0};
+            Bit#(80) writeen = 15 << shamt;
+            Bit#(640) data = extend(l.data) << {shamt, 3'b0};
+            mem.request(address, writeen, data);
           end
         end
 

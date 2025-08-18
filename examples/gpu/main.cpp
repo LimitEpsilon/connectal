@@ -7,6 +7,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <sys/syslimits.h>
+#else
+#include <limits.h>
+#endif
 
 #include "ConnectalProcIndication.h"
 #include "ConnectalProcRequest.h"
@@ -79,7 +84,7 @@ int main(int argc, char *const *argv) {
   ind = new ConnectalProcIndication(IfcNames_ConnectalProcIndicationH2S);
 
   // initialize memory
-  char pathbuf[1024];
+  char pathbuf[PATH_MAX];
   const char *mem = realpath(argv[1], pathbuf);
   load_elf(connectalProc, meminit_sem, mem);
   connectalProc->hostToCpu(0, 0, 0, 1);

@@ -13,8 +13,11 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 */
 
-import Types::*;
 import Vector::*;
+import ClientServer::*;
+import Memory::*;
+
+import Types::*;
 import CMemTypes::*;
 
 // cpu to host data type
@@ -32,7 +35,9 @@ typedef struct {
 
 interface Proc;
   method ActionValue#(CpuToHostData) cpuToHost;
-  method Action hostToCpu(Bit#(PhysAddrSz) addr, Data data, Addr pc, Bool last);
+  method Action hostToCpu(Addr pc);
+  interface MemoryClient#(AddrSz, DataSz) iMemClient;
+  interface MemoryClient#(MemHeight, PhysDataSz) dMemClient;
 endinterface
 
 // general purpose reg index
