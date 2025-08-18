@@ -10,7 +10,16 @@ BSVPATH += / \
 	src/includes \
 	$(CONNECTALDIR)/bsv
 CPPFILES += \
-	main.cpp
+	main.cpp \
+	loadelf.cpp
+
+OS := $(shell uname -s)
+
+ifeq ($(OS),Darwin)
+CONNECTALFLAGS += --cxxflags="-lelf -I/opt/homebrew/include/libelf -I/opt/homebrew/include -L/opt/homebrew/lib"
+else
+CONNECTALFLAGS += --cxxflags="-lelf"
+endif
 
 TNUM = 4
 WNUM = 8
@@ -21,7 +30,6 @@ SOFTWARE_SOCKET_NAME=/tmp/connectal$(USER)
 CONNECTALFLAGS += -D THREAD_NUM=$(TNUM) -D WARP_NUM=$(WNUM)
 CONNECTALFLAGS += --bscflags " -steps-max-intervals 50 +RTS -K256M -RTS"
 CONNECTALFLAGS += --bscflags " -show-schedule"
-#CONNECTALFLAGS += --cxxflags="-g -std=gnu++11"
 
 include $(CONNECTALDIR)/Makefile.connectal
 
