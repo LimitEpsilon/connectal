@@ -67,12 +67,12 @@ module mkConnectalWrapper#(HostInterface host, ConnectalProcIndication ind) (Con
   let ddrClient <- deriveDDR4Client(m.dMemClient);
   let iMem <- mkIMemory;
   Reg#(Maybe#(Addr)) startpc <- mkReg(tagged Invalid);
+  Reg#(Bool) iMemOOB <- mkReg(False);
+  Reg#(Bool) dMemOOB <- mkReg(False);
 
-  mkConnection(iMem.iMemServer, m.iMemClient);
 `ifdef SIMULATION
   DDR4_User_VCU108 ddrServer <- mkDDR4Simulator;
   let ddrInit <- mkMemInitDDR(ddrServer);
-  mkConnection(ddrClient, ddrServer);
 `else
   Clock curr_clk <- exposeCurrentClock();
   Reset curr_rst_n <- exposeCurrentReset();
@@ -89,8 +89,6 @@ module mkConnectalWrapper#(HostInterface host, ConnectalProcIndication ind) (Con
   let ddrServer <- mkDDR4ServerSync(ddr4_ctrl_0.user, ddr4clk0, ddr4rstn0, curr_clk, curr_rst_n);
   let ddrInit <- mkMemInitDDR(ddrServer);
 
-  mkConnection(ddrClient, ddrServer);
-
   // DDR4 C2
   let sys_clk2 = host.tsys_clk1_300mhz_buf;
   let sys_rst2 <- mkAsyncResetFromCR(20, sys_clk2);
@@ -104,11 +102,53 @@ module mkConnectalWrapper#(HostInterface host, ConnectalProcIndication ind) (Con
 //  mkConnection(ddr_cli_300mhz_1, ddr4_ctrl_1.user);
 `endif // SIMULATION
 
-  rule relay_message;
-    let mess <- m.cpuToHost;
-    ind.sendMessage(pack(mess));
+  (* fire_when_enabled *)
+  rule request_imem(iMem.init.done);
+    let req <- m.iMemClient.request.get;
+    Bit#(TSub#(AddrSz, TAdd#(IMemAddrSz, 2))) upper = req.address[valueOf(AddrSz)-1 : valueOf(IMemAddrSz)+2];
+    if (upper == 0)
+      iMem.iMemServer.request.put(req);
+    else
+      iMemOOB <= True;
   endrule
 
+  (* fire_when_enabled *)
+  rule response_imem(iMem.init.done);
+    let resp <- iMem.iMemServer.response.get;
+    m.iMemClient.response.put(resp);
+  endrule
+
+  (* fire_when_enabled *)
+  rule request_ddr(ddrInit.done);
+    let req <- ddrClient.request.get;
+    Bit#(TSub#(AddrSz, PhysAddrSz)) upper = req.address[valueOf(AddrSz)-1 : valueOf(PhysAddrSz)];
+    if (upper == 0)
+      ddrServer.request(truncate(req.address), req.writeen, req.datain);
+    else
+      dMemOOB <= True;
+  endrule
+
+  (* fire_when_enabled *)
+  rule response_ddr(ddrInit.done);
+    let resp <- ddrServer.read_data;
+    ddrClient.response.put(resp);
+  endrule
+
+  (* fire_when_enabled *)
+  rule relay_message(iMem.init.done && ddrInit.done);
+    if (dMemOOB) begin
+      let mess = CpuToHostData {c2hType: ExitCode, data: 2};
+      ind.sendMessage(pack(mess));
+    end else if (iMemOOB) begin
+      let mess = CpuToHostData {c2hType: ExitCode, data: 3};
+      ind.sendMessage(pack(mess));
+    end else begin
+      let mess <- m.cpuToHost;
+      ind.sendMessage(pack(mess));
+    end
+  endrule
+
+  (* fire_when_enabled *)
   rule signal_done (iMem.init.done && ddrInit.done && isValid(startpc));
     m.hostToCpu(fromMaybe(?, startpc));
     startpc <= tagged Invalid;

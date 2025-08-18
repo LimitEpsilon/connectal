@@ -1,3 +1,4 @@
+OS := $(shell uname -s)
 CONNECTALDIR?=$(HOME)/connectal
 PLATFORMDIR=$(CONNECTALDIR)/platform
 MIGDIR=$(PLATFORMDIR)/xilinx/ddr4_v2_2
@@ -19,8 +20,10 @@ BSVPATH += / \
 	$(PLATFORMDIR)/lib
 
 CPPFILES += \
-	main.cpp
+	main.cpp \
+	loadelf.cpp
 
+# set main clock period
 CONNECTALFLAGS += --mainclockperiod=8
 
 # for DDR
@@ -36,6 +39,11 @@ SYNCFIFO_640_32 = $(CONNECTALDIR)/out/$(BOARD)/sync_bram_fifo_w640_d32/sync_bram
 
 CONNECTALFLAGS += --xci $(SYNCFIFO_784_32) --xci $(SYNCFIFO_640_32)
 
+# compiler flags
+ifeq ($(OS),Darwin)
+CONNECTALFLAGS += --cxxflags="-I/opt/homebrew/include/libelf -I/opt/homebrew/include -L/opt/homebrew/lib"
+endif
+CONNECTALFLAGS += --clib="elf"
 CONNECTALFLAGS += --bscflags " -steps-max-intervals 50 +RTS -K256M -RTS"
 CONNECTALFLAGS += --bscflags " -show-schedule"
 

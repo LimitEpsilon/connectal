@@ -1,24 +1,25 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
-#include <errno.h>
 #include <fcntl.h>
-#include <fstream>
-#include <iostream>
-#include <list>
 #include <semaphore.h>
-#include <signal.h>
 #include <stdio.h>
 #include <string.h>
-#include <string>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <vector>
+#ifdef __APPLE__
+#include <sys/syslimits.h>
+#else
+#include <limits.h>
+#endif
 
 #include "ConnectalProcIndication.h"
 #include "ConnectalProcRequest.h"
 
 using namespace std;
+
+// forward declaration of function defined in loadelf.cpp
+int load_elf(ConnectalProcRequestProxy *proc, sem_t *sem, const char *name);
 
 static ConnectalProcRequestProxy *connectalProc = 0;
 sem_t *done_sem;
@@ -56,6 +57,11 @@ public:
 
 static ConnectalProcIndication *ind = 0;
 int main(int argc, char *const *argv) {
+  if (argc < 2) {
+    fprintf(stderr,
+            "Pass in the filename of the elf file to be loaded onto the GPU\n");
+    exit(1);
+  }
   printf("Start testbench:\n");
 
   // initialize semaphores
@@ -63,13 +69,13 @@ int main(int argc, char *const *argv) {
   if ((done_sem = sem_open(done_sem_name, O_CREAT | O_EXCL, 0644, 0)) ==
       SEM_FAILED) {
     fprintf(stderr, "failed to initialize done_sem\n");
-    return -1;
+    exit(1);
   }
   sem_unlink(meminit_sem_name);
   if ((meminit_sem = sem_open(meminit_sem_name, O_CREAT | O_EXCL, 0644, 0)) ==
       SEM_FAILED) {
     fprintf(stderr, "failed to initialize meminit_sem\n");
-    return -1;
+    exit(1);
   }
   fflush(stdout);
 
@@ -78,44 +84,11 @@ int main(int argc, char *const *argv) {
   ind = new ConnectalProcIndication(IfcNames_ConnectalProcIndicationH2S);
 
   // initialize memory
-  char cwd[1024];
-  const char *mem = strcat(getcwd(cwd, sizeof(cwd)), "/mem.vmh");
-  FILE *fd = fopen(mem, "r");
-  if (fd == NULL) {
-    fprintf(stderr, "Cannot find %s\n", mem);
-    return -1;
-  }
-  uint32_t addr = 0;
-  uint32_t data = 0;
-  int c;
-  int skip_line = 0;
-  int empty_line = 1;
-  while ((c = getc(fd)) != EOF) {
-    if (skip_line) {
-      if (c == '\n' || c == '\r') {
-        empty_line = 1;
-        skip_line = 0;
-      }
-    } else if (c == '\n' || c == '\r') {
-      if (!empty_line) {
-        connectalProc->hostToCpu(addr, data, 0, 0);
-        sem_wait(meminit_sem);
-        data = 0;
-        addr += 4;
-      }
-    } else {
-      empty_line = 0;
-      if ('0' <= c && c < '0' + 10) {
-        data = (data << 4) | (c - '0');
-      } else if ('a' <= c && c < 'a' + 6) {
-        data = (data << 4) | (c - 'a' + 10);
-      } else {
-        skip_line = 1;
-      }
-    }
-  }
+  char pathbuf[PATH_MAX];
+  const char *mem = realpath(argv[1], pathbuf);
+  load_elf(connectalProc, meminit_sem, mem);
   connectalProc->hostToCpu(0, 0, 0, 1);
-  printf("Processor started");
+  printf("Processor started\n");
   fflush(stdout);
 
   // Now the processor is running we are waiting for it to be done

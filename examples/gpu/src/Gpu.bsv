@@ -623,9 +623,9 @@ module mkProc(Proc);
   Reg#(Addr) startpc <- mkReg(0);
   Reg#(Bool) started <- mkReg(False);
 
-  FIFOF#(Bit#(8)) putchars <- mkBypassFIFOF;
-  FIFOF#(void) error <- mkBypassFIFOF;
-  FIFOF#(void) done <- mkBypassFIFOF;
+  FIFOF#(Bit#(8)) putchars <- mkGFIFOF(False, True);
+  FIFOF#(void) error <- mkGFIFOF(False, True);
+  FIFOF#(void) done <- mkGFIFOF(False, True);
 
   (* fire_when_enabled *)
   rule processIMem;
