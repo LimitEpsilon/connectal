@@ -44,20 +44,20 @@ endinterface
 typedef Bit#(5) RIndx;
 
 // opcode
-typedef Bit#(7) Opcode;
-Opcode opLoad    = 7'b0000011;
-Opcode opMiscMem = 7'b0001111;
-Opcode opOpImm   = 7'b0010011;
-Opcode opAuipc   = 7'b0010111;
-Opcode opStore   = 7'b0100011;
-Opcode opAmo     = 7'b0101111;
-Opcode opOp      = 7'b0110011;
-Opcode opLui     = 7'b0110111;
-Opcode opBranch  = 7'b1100011;
-Opcode opJalr    = 7'b1100111;
-Opcode opJal     = 7'b1101111;
-Opcode opSystem  = 7'b1110011;
-Opcode opSched   = 7'b0001011;
+typedef Bit#(5) Opcode;
+Opcode opLoad    = 5'b00000;
+Opcode opMiscMem = 5'b00011;
+Opcode opOpImm   = 5'b00100;
+Opcode opAuipc   = 5'b00101;
+Opcode opStore   = 5'b01000;
+Opcode opAmo     = 5'b01011;
+Opcode opOp      = 5'b01100;
+Opcode opLui     = 5'b01101;
+Opcode opBranch  = 5'b11000;
+Opcode opJalr    = 5'b11001;
+Opcode opJal     = 5'b11011;
+Opcode opSystem  = 5'b11100;
+Opcode opSched   = 5'b00010;
 
 // CSR index
 typedef 12 CsrSz;
@@ -157,6 +157,7 @@ typedef struct {
   BrFunc   brFunc;
   Bool     conv; // split or join
   Bool     predN;
+  Bool     dstValid;
   RIndx    dst;
   RIndx    src1;
   RIndx    src2;
@@ -180,11 +181,10 @@ typedef struct {
   MFunc    mFunc;
   BrFunc   brFunc;
   Bool     predN; // rd != 0
+  RIndx    dst;
+  CsrIndx  csr;
   Bool     immValid; // Mem, jalr
   Data     imm; // Mem, jalr
-  CsrIndx  csr;
-  Bool     write;
-  RIndx    dst;
 } RFCont deriving(Bits, Eq, FShow);
 
 typedef struct {
@@ -274,14 +274,14 @@ Bit#(3) fnPRED    = 3'b101;
 function Fmt showInst(RawInst inst);
 	Fmt ret = $format("");
 
-  Opcode opcode = inst[  6 :  0 ];
+  Opcode opcode = inst[  6 :  2 ];
   let rd        = inst[ 11 :  7 ];
   let funct3    = inst[ 14 : 12 ];
   let rs1       = inst[ 19 : 15 ];
   let rs2       = inst[ 24 : 20 ];
   let funct7    = inst[ 31 : 25 ];
   let mulDiv    = funct7 == 1; // M-instructions
-  let czSel     = unpack(opcode[5]) && funct7 == 7; // OpOp and funct7 is 7 -> Zicond extension
+  let czSel     = unpack(inst[5]) && funct7 == 7; // OpOp and funct7 is 7 -> Zicond extension
   let aluSel    = inst[30]; // select between Add/Sub, Srl/Sra
 
   Data immI = signExtend(inst[31:20]);

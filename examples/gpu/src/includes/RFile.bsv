@@ -10,22 +10,33 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 */
 
-// Correct use of the register file implies that the same index can't be used for simultaneous read and write from different rules. If different indices are used reads and writes are conflict free. If the reads and writes are in the same rule, write updates the file at the end of the rule.
-// We have imitated this conflict free behavior using config regs.
-// If we had used ordinary registers, then read<write
-// In many designs where we needed Bypass register file, the bypassing was implemented outside the register file, explicitly.
-
 import Types::*;
 import ProcTypes::*;
 import Vector::*;
 import FIFOF::*;
 import SpecialFIFOs::*;
 import BRAM::*;
+import MergeTree::*;
 
 // 32 * (number of warps) ÷ 2 registers per lane
 typedef TAdd#(4, LogWarpNum) LaneRIndxSz;
 typedef Bit#(LaneRIndxSz) LaneRIndx;
 typedef TExp#(LaneRIndxSz) RegPerLane;
+
+typedef struct {
+  Bool    conv;
+  Bool    dstValid;
+  RIndx   rs1;
+  RIndx   rs2;
+} RFRdReq deriving (Bits, Eq, FShow);
+
+typedef struct {
+  Bool    conv;
+  RIndx   rd;
+  Bit#(TSub#(LogWarpNum, 1))  wid;
+  Bit#(n) mask;
+  Vector#(n, Data) datas;
+} RFWrReq#(numeric type n) deriving (Bits, Eq, FShow);
 
 typedef struct {
   Bool    write;
@@ -37,6 +48,23 @@ typedef struct {
   Bit#(n) mask;
   Vector#(n, Data) datas;
 } RFReq#(numeric type n) deriving (Bits, Eq, FShow);
+
+function RFReq#(ThreadNum) fromRdReq(RFRdReq req, RFCont cont);
+  match RFRdReq {conv: .conv, rs1: .rs1, rs2: .rs2} = req;
+  match RFCont {warp: .warp} = cont;
+  match Warp {wid: .wid, mask: .mask} = warp;
+  Bit#(TSub#(LogWarpNum, 1)) upperWid = wid[valueOf(LogWarpNum)-1 : 1];
+  return RFReq {
+    write: False, conv: conv, rs1: rs1, rs2: rs2, rd: ?, wid: upperWid, mask: mask, datas: ?
+  };
+endfunction
+
+function RFReq#(n) fromWrReq(RFWrReq#(n) req);
+  match RFWrReq {conv: .conv, rd: .rd, wid: .wid, mask: .mask, datas: .datas} = req;
+  return RFReq {
+    write: True, conv: conv, rs1: ?, rs2: ?, rd: rd, wid: wid, mask: mask, datas: datas
+  };
+endfunction
 
 typedef struct {
   Vector#(n, Data) rv1;
@@ -147,5 +175,89 @@ endmodule
 module mkVectorRFile(VectorRFile#(ThreadNum));
   let m <- mkVecRFile;
   return m;
+endmodule
+
+interface Scoreboard;
+  interface Vector#(TDiv#(WarpNum, 2), Put#(Tuple2#(RFRdReq, RFCont))) iport;
+  method Action deq(Bool write, Bit#(TSub#(LogWarpNum, 1)) wid, RIndx rd);
+  method Tuple2#(RFRdReq, RFCont) first;
+  method Bool notEmpty;
+endinterface
+
+(* synthesize *)
+module mkScoreboard(Scoreboard);
+  (* hide *) Reg#(Maybe#(Tuple2#(RFRdReq, RFCont))) out[2] <- mkCReg(2, tagged Invalid);
+  (* hide *) Vector#(TDiv#(WarpNum, 2), Reg#(Tuple2#(RFRdReq, RFCont))) ibuf <- replicateM(mkRegU);
+  (* hide *) Reg#(Bool) cur[2] <- mkCReg(2, False); // current epoch
+  (* hide *) Vector#(TDiv#(WarpNum, 2), Reg#(Bit#(32))) pending <- replicateM(mkReg(0));
+  Vector#(TDiv#(WarpNum, 2), Array#(Reg#(Epoch))) iports <-
+    replicateM(mkCReg(2, Epoch {epoch: False, valid: False}));
+  Vector#(TDiv#(WarpNum, 2), Put#(Tuple2#(RFRdReq, RFCont))) inner;
+  Vector#(TDiv#(WarpNum, 2), Bool) isPending;
+  Vector#(TDiv#(WarpNum, 2), Bool) epochF;
+  Vector#(TDiv#(WarpNum, 2), Bool) epochT;
+
+  for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1) begin
+    match {.req, .cont} = ibuf[i];
+    // rs1 is always valid, rs2 is invalid only when immValid && dstValid
+    // dstValid means that iType != Sched
+    Bool rs1Pending = unpack(pending[i][req.rs1]);
+    Bool rs2Pending = (!cont.immValid || !req.dstValid) && unpack(pending[i][req.rs2]);
+    Bool dstPending = req.dstValid && unpack(pending[i][cont.dst]);
+    isPending[i] = rs1Pending || rs2Pending || dstPending;
+  end
+
+  for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1) begin
+    match Epoch {epoch: .epoch, valid: .valid} = iports[i][0];
+    epochF[i] = epoch ? False : valid && !isPending[i];
+  end
+
+  for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1) begin
+    match Epoch {epoch: .epoch, valid: .valid} = iports[i][0];
+    epochT[i] = epoch ? valid && !isPending[i] : False;
+  end
+
+  for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1)
+    inner[i] =
+      interface Put;
+        method Action put(x) if (!iports[i][1].valid);
+          iports[i][1] <= Epoch {epoch: !cur[1], valid: True};
+          ibuf[i] <= x;
+        endmethod
+      endinterface;
+
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule enq_out(!isValid(out[0]));
+    let idxF = findIndex(id, epochF);
+    let idxT = findIndex(id, epochT);
+    let idx =
+      case (tuple2(idxF, idxT)) matches
+        {tagged Valid .iF, tagged Valid .iT}: cur[0] ? iT : iF;
+        {tagged Valid .iF, tagged Invalid}: iF;
+        {tagged Invalid, tagged Valid .iT}: iT;
+        default: 0;
+      endcase;
+    if (isValid(idxF) || isValid(idxT)) begin
+      iports[idx][0].valid <= False;
+      out[0] <= tagged Valid ibuf[idx];
+    end
+    if (!isValid(idxF) || !isValid(idxT))
+      cur[0] <= isValid(idxT);
+  endrule
+
+  interface iport = inner;
+  method Action deq(Bool write, Bit#(TSub#(LogWarpNum, 1)) wid, RIndx rd);
+    if (write) begin
+      Bit#(32) mask = ~(1 << rd);
+      pending[wid] <= pending[wid] & mask;
+    end else if (out[1] matches tagged Valid {.req, .cont}) begin
+      Bit#(TSub#(LogWarpNum, 1)) upperWid = cont.warp.wid[valueOf(LogWarpNum)-1 : 1];
+      Bit#(32) mask = extend(pack(req.dstValid)) << cont.dst;
+      pending[upperWid] <= pending[upperWid] | {mask[31 : 1], 1'b0};
+      out[1] <= tagged Invalid;
+    end
+  endmethod
+  method first if (isValid(out[1])) = fromMaybe(?, out[1]);
+  method notEmpty = isValid(out[1]);
 endmodule
 

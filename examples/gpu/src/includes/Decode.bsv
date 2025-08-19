@@ -20,7 +20,7 @@ import Vector::*;
 
 (* noinline *)
 function DecodedInst decode(RawInst inst);
-  Opcode opcode = inst[  6 :  0 ];
+  Opcode opcode = inst[  6 :  2 ];
   RIndx rd      = inst[ 11 :  7 ];
   let funct3    = inst[ 14 : 12 ];
   RIndx rs1     = inst[ 19 : 15 ];
@@ -30,8 +30,9 @@ function DecodedInst decode(RawInst inst);
   // let fm        = inst[ 31 : 28 ];
   let funct7    = inst[ 31 : 25 ];
   let mulDiv    = funct7 == 1; // M-instructions
-  let czSel     = unpack(opcode[5]) && funct7 == 7; // OpOp and funct7 is 7 -> Zicond extension
-  let aluSel    = inst[30]; // select between Add/Sub, Srl/Sra
+  Bool isOp     = unpack(inst[5]); // distinguish between opOp and opImm
+  let czSel     = isOp && funct7 == 7; // OpOp and funct7 is 7 -> Zicond extension
+  Bool aluSel   = unpack(inst[30]); // select between Add/Sub, Srl/Sra
 
   Data immI = signExtend({ inst[31:20] });
   Data immS = signExtend({ inst[31:25], inst[11:7] });
@@ -50,12 +51,12 @@ function DecodedInst decode(RawInst inst);
       fnBEQ, fnBNE, fnBLT, fnBLTU, fnBGE, fnBGEU: Br;
       default: Unsupported;
     endcase
-    opLoad: case (funct3) // only support LW, rd <- M[rs1 + immI]; pc <- pc + 4
+    opLoad: case (funct3) // rd <- M[rs1 + immI]; pc <- pc + 4
       fnLW: Ld;
       fnLB, fnLH, fnLBU, fnLHU: LdMask;
       default: Unsupported;
     endcase
-    opStore: case (funct3) // only support SW, M[rs1 + immI] <- rs2; pc <- pc + 4
+    opStore: case (funct3) // M[rs1 + immI] <- rs2; pc <- pc + 4
       fnSW: St;
       fnSB, fnSH: StMask;
       default: Unsupported;
@@ -81,19 +82,19 @@ function DecodedInst decode(RawInst inst);
     default: Unsupported;
   endcase;
 
-  let aluValid = { opcode[6], opcode[4:0] } == { opOp[6], opOp[4:0] };  // opOp or opImm
+  let aluValid = { opcode[4], opcode[2:0] } == { opOp[4], opOp[2:0] };  // opOp or opImm
 
   let aluFunc =
     aluValid ?
     case (funct3)
-      fnADD:  unpack(opcode[5]) && unpack(aluSel) ? Sub : Add;
+      fnADD:  isOp && aluSel ? Sub : Add;
       fnSLT:  Slt;
       fnSLTU: Sltu;
       fnAND:  czSel ? Ceqz : And;
       fnOR:   Or;
       fnXOR:  Xor;
       fnSLL:  Sll;
-      fnSR:   unpack(aluSel) ? Sra : (czSel ? Cnez : Srl);
+      fnSR:   aluSel ? Sra : (czSel ? Cnez : Srl);
     endcase :
     Add;
 
@@ -109,10 +110,11 @@ function DecodedInst decode(RawInst inst);
     default: NT;
   endcase;
 
-  let conv = { opcode[3:0], funct3[1] } == { opSched[3:0], fnSPLIT[1] }; // split/join are the only instructions with funct3 = x1x among the scheduling instructions
+  // split/join are the only instructions with funct3 = x1x among the scheduling instructions
+  let conv = { opcode[1:0], funct3[1] } == { opSched[1:0], fnSPLIT[1] };
 
-  let immValid = opcode[5:0] != opOp[5:0]; // opOp or opSystem, used to select the second argument to give to the *alu*
-
+  // opOp or opSystem, used to select the second argument to give to the *alu*
+  let immValid = opcode[3:0] != opOp[3:0];
   let imm = case (opcode)
     opLui, opAuipc: immU;
     opJal: immJ;
@@ -121,6 +123,10 @@ function DecodedInst decode(RawInst inst);
     default: immI;
   endcase;
 
+  // among instructions that go to the scoreboard, should the rd field be considered?
+  // also, instructions such that immValid == True but uses rs2
+  let dstValid = opcode != opBranch && opcode != opStore && opcode != opSched;
+
   let dInst = DecodedInst {
     iType: iType,
     aluFunc: aluFunc,
@@ -128,8 +134,9 @@ function DecodedInst decode(RawInst inst);
     brFunc: brFunc, // only used by branch instructions
     conv: conv,
     predN: rd != 0 && rs2 != 0, // if pred, rs2 != 0. if split, rd != 0
+    dstValid: dstValid,
     dst: rd,
-    src1: opcode == opLui ? 0 : rs1,
+    src1: opcode == opLui ? 0 : rs1, // LUI is the only instruction using immU that goes to the RF
     src2: rs2,
     csr: truncate(immI),
     immValid: immValid,

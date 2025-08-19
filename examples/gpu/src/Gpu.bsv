@@ -37,7 +37,7 @@ module mkCall(CoalTree#(ThreadNum, AddrSz, void));
 endmodule
 
 (* synthesize *)
-module mkWarpIn(MergeTree#(7, Warp));
+module mkWarpIn(MergeTree#(4, Warp));
   let t <- mkMergeTree;
   return t;
 endmodule
@@ -59,13 +59,13 @@ module mkIMemReq(MergeTree#(2, Warp));
 endmodule
 
 (* synthesize *)
-module mkOneRfIn(MergeTree#(4, Tuple2#(RFReq#(ThreadNum), RFCont)));
+module mkOneRfIn(MergeTree#(5, RFWrReq#(ThreadNum)));
   let t <- mkMergeTree;
   return t;
 endmodule
 
 function
-  Module#(Vector#(2, MergeTree#(4, Tuple2#(RFReq#(ThreadNum), RFCont))))
+  Module#(Vector#(2, MergeTree#(5, RFWrReq#(ThreadNum))))
   mkRfIn = replicateM(mkOneRfIn);
 
 (* synthesize *)
@@ -145,21 +145,18 @@ module mkCore(Core);
   let brus <- mkVectorBru;
   // CALL
   let call <- mkCall;
-  Reg#(Bool) lastEpoch <- mkReg(False);
-  Reg#(WarpId) lastWid <- mkReg(?);
-  Fifo#(TAdd#(1, TLog#(ThreadNum)), WarpId) callOut <- mkLatencyFifo(True, False);
 
   // from START
   Vector#(2, FIFOF#(SchedResp)) startIn <- replicateM(mkLFIFOF);
-  // from IF, EX, BRTaken, BRNTaken, MEM, CSR, CALL
+  // from IF, BRTaken, BRNTaken, CALL
   let warpIn <- mkWarpIn;
 
   let warps <- mkWarps;
   Fifo#(2, Warp) ifOut <- mkPipelineFifo(True, False);
-  // from START
-  Vector#(2, FIFOF#(RFReq#(ThreadNum))) schedRfIn <- replicateM(mkLFIFOF);
-  // from EX (Wr), MEM (Wr), CSR (Wr), IF (Wr for Auipc and J, else Rd)
+  Vector#(2, Scoreboard) scoreboards <- replicateM(mkScoreboard);
+  // from IF, EX, MEM, CSR, START
   let rfIn <- mkRfIn;
+  Vector#(2, Reg#(Bool)) lastWrite <- replicateM(mkReg(False));
   Vector#(2, FIFOF#(RFCont)) rfOut <- replicateM(mkLFIFOF);
   // from RF
   let schedIn <- mkSchedIn;
@@ -172,10 +169,14 @@ module mkCore(Core);
   // from RF
   let divIn <- mkDivIn;
   Fifo#(TAdd#(1, DivStage), EXCont) divOut <- mkLatencyFifo(True, False);
-  Vector#(2, FIFOF#(Vector#(ThreadNum, Data))) stData <- replicateM(mkFIFOF);
+  Vector#(2, FIFOF#(Vector#(ThreadNum, Data))) stData <- replicateM(mkGFIFOF(False, True));
   // from RF
   let brIn <- mkBrIn;
   Fifo#(2, BRCont) brOut <- mkPipelineFifo(True, False);
+  // CALL
+  Reg#(Bool) lastEpoch <- mkReg(False);
+  Reg#(WarpId) lastWid <- mkReg(?);
+  Fifo#(TAdd#(1, TLog#(ThreadNum)), WarpId) callOut <- mkLatencyFifo(True, False);
   // from EX
   let memIn <- mkMemIn;
   Fifo#(2, MEMCont) memOut <- mkLatencyFifo(True, False);
@@ -195,11 +196,11 @@ module mkCore(Core);
       if (startIn[i].notEmpty) begin // explicitly prioritize new warps
         match SchedResp {warp: .newWarp, write: .write, top: .top} = startIn[i].first;
         let upperWid = newWarp.wid[logWarpNum-1 : 1];
-        RFReq#(ThreadNum) rfReq = RFReq {
-          write: True, conv: True, rs1: ?, rs2: ?, rd: 1, mask: newWarp.mask, wid: upperWid, datas: replicate(top)
+        RFWrReq#(ThreadNum) rfReq = RFWrReq {
+          conv: True, rd: 1, mask: newWarp.mask, wid: upperWid, datas: replicate(top)
         };
         warps[i].enq(newWarp);
-        if (write) schedRfIn[i].enq(rfReq);
+        if (write) rfIn[i].iport[4].put(rfReq);
         startIn[i].deq;
       end else if (warpIn.notEmpty && warp.wid[0] == fromInteger(i)) begin
         warps[i].enq(warp);
@@ -248,6 +249,7 @@ module mkCore(Core);
       brFunc: .brFunc,
       conv: .conv,
       predN: .predN,
+      dstValid: .dstValid,
       dst: .dst,
       src1: .rs1,
       src2: .rs2,
@@ -265,13 +267,15 @@ module mkCore(Core);
     let takenPc = pc + imm;
     let nTakenPc = pc + 4;
     let lowerWid = wid[0];
-    let upperWid = wid[logWarpNum-1 : 1];
-    let warp = Warp {mask: mask, wid: wid, pc: nTakenPc};
+    Bit#(TSub#(LogWarpNum, 1)) upperWid = wid[logWarpNum-1 : 1];
+    let nextPc = inst[6 : 2] == opJal ? takenPc : nTakenPc;
+    let retPc = inst[6 : 2] == opJal ? nTakenPc : takenPc;
+    let warp = Warp {mask: mask, wid: wid, pc: nextPc};
 
-    RFReq#(ThreadNum) rfReq = RFReq {
-      write: False, conv: conv, rs1: rs1, rs2: rs2, rd: dst, wid: upperWid, mask: mask, datas: ?
+    RFWrReq#(ThreadNum) wrReq = RFWrReq {
+      conv: conv, rd: dst, wid: upperWid, mask: mask, datas: replicate(retPc)
     };
-
+    let rdReq = RFRdReq {conv: conv, rs1: rs1, rs2: rs2, dstValid: dstValid};
     let rfCont = RFCont {
       warp: warp,
       takenPc: takenPc,
@@ -283,30 +287,21 @@ module mkCore(Core);
       immValid: immValid,
       imm: imm,
       csr: csr,
-      write: False,
       dst: dst
     };
 
-    case (iType)
-      J: begin
-        rfReq.write = True;
-        rfReq.datas = replicate(nTakenPc);
-        warpIn.iport[0].put(Warp{ mask: mask, wid: wid, pc: takenPc });
-      end
-      Auipc: begin
-        rfReq.write = True;
-        rfReq.datas = replicate(takenPc);
-        warpIn.iport[0].put(warp);
-      end
-      Fence: begin
-        warpIn.iport[0].put(warp); // no-op for now
-      end
-      Csrw: begin
-        rfCont.write = True;
-      end
+    // enq into warpIn
+    case (inst[6 : 2])
+      opJalr, opBranch, opSched: noAction;
+      default: warpIn.iport[0].put(warp);
+    endcase
+    // enq into scoreboard or send write to RF
+    case (inst[6 : 2])
+      opMiscMem: noAction;
+      opJal, opAuipc: rfIn[lowerWid].iport[0].put(wrReq);
+      default: scoreboards[lowerWid].iport[upperWid].put(tuple2(rdReq, rfCont));
     endcase
 
-    rfIn[lowerWid].iport[3].put(tuple2(rfReq, rfCont));
     iMemResp.deq;
     ifOut.deq;
   endrule
@@ -314,20 +309,20 @@ module mkCore(Core);
   for (Integer i = 0; i < 2; i = i + 1) begin
     (* fire_when_enabled *)
     rule doRF;
-      match {.req, .cont} = rfIn[i].notEmpty ? rfIn[i].first : ?;
-      if (schedRfIn[i].notEmpty) begin
-        rfs[i].ask.put(schedRfIn[i].first);
-        $display("SchedRfIn%0d", i);
-        schedRfIn[i].deq;
+      match {.rdReq, .cont} = scoreboards[i].notEmpty ? scoreboards[i].first : ?;
+      let wrReq = rfIn[i].notEmpty ? rfIn[i].first : ?;
+      if ((lastWrite[i] || !rfIn[i].notEmpty) && scoreboards[i].notEmpty) begin
+        $display("doRF%0d", i);
+        rfs[i].ask.put(fromRdReq(rdReq, cont));
+        rfOut[i].enq(cont);
+        scoreboards[i].deq(False, ?, ?);
+        lastWrite[i] <= False;
       end else if (rfIn[i].notEmpty) begin
-        rfs[i].ask.put(req);
-        if (req.write) begin
-          $display("WB%0d", i);
-        end else begin
-          $display("doRF%0d", i);
-          rfOut[i].enq(cont);
-        end
+        $display("WB%0d", i);
+        rfs[i].ask.put(fromWrReq(wrReq));
+        scoreboards[i].deq(True, wrReq.wid, wrReq.conv ? 0 : wrReq.rd);
         rfIn[i].deq;
+        lastWrite[i] <= True;
       end
     endrule
 
@@ -345,7 +340,6 @@ module mkCore(Core);
         immValid: .immValid,
         imm: .imm,
         csr: .csr,
-        write: .write,
         dst: .dst
       } = rfOut[i].first;
       match RFResp {rv1: .rv1, rv2: .rv2} <- rfs[i].ans.get;
@@ -376,7 +370,7 @@ module mkCore(Core);
       EXCont exCont = EXCont {warp: warp, iType: iType, memMask: memMask, dst: dst};
       BruReq#(ThreadNum) brReq = BruReq {f: brFunc, v1: rv1, v2: rv2};
       BRCont brCont = BRCont {warp: warp, takenPc: takenPc};
-      CsrReq#(ThreadNum) csrReq = CsrReq {wid: warp.wid, mask: warp.mask, csr: csr, write: write, datas: rv1};
+      CsrReq#(ThreadNum) csrReq = CsrReq {wid: warp.wid, mask: warp.mask, csr: csr, write: iType == Csrw, datas: rv1};
       CSRCont csrCont = CSRCont {warp : warp, dst: dst};
 
       case (iType)
@@ -441,8 +435,8 @@ module mkCore(Core);
     let lowerWid = warp.wid[0];
     let upperWid = warp.wid[logWarpNum-1 : 1];
 
-    RFReq#(ThreadNum) rfReq = RFReq {
-      write: True, conv: False, rs1: ?, rs2: ?, rd: dst, wid: upperWid, mask: warp.mask,
+    RFWrReq#(ThreadNum) rfReq = RFWrReq {
+      conv: False, rd: dst, wid: upperWid, mask: warp.mask,
       datas: iType == Jr ? replicate(warp.pc) : res
     };
 
@@ -456,7 +450,7 @@ module mkCore(Core);
       (isH ? zeroExtend(2'b11) : zeroExtend(1'b1)) :
       signExtend(1'b1);
     MemReq#(ThreadNum) memReq = VecMemoryRequest {
-      write: isWrite, byteen: en, addresses: addresses, datas: ?, mask: warp.mask
+      write: isWrite, byteen: en, addresses: addresses, datas: stData[lowerWid].first, mask: warp.mask
     };
     let memCont = MEMCont {warp: warp, sign: sign, byteen: en, dst: dst};
 
@@ -467,20 +461,17 @@ module mkCore(Core);
 
     case (iType)
       Alu, MulDiv: begin
-        rfIn[lowerWid].iport[0].put(tuple2(rfReq, ?));
-        warpIn.iport[1].put(warp);
+        rfIn[lowerWid].iport[1].put(rfReq);
       end
       Ld, LdMask: begin
         memIn.iport[0].put(tuple2(memReq, memCont));
       end
       St, StMask: begin
-        memReq.datas = stData[lowerWid].first;
         memIn.iport[0].put(tuple2(memReq, memCont));
-        warpIn.iport[1].put(warp);
         stData[lowerWid].deq;
       end
       Jr: begin
-        rfIn[lowerWid].iport[0].put(tuple2(rfReq, ?));
+        rfIn[lowerWid].iport[1].put(rfReq);
         call.enq(zipWith(filt, unpack(warp.mask), res));
         callOut.enq(warp.wid);
       end
@@ -513,8 +504,8 @@ module mkCore(Core);
     let nTMask = warp.mask & ~pack(res);
     let tWarp = Warp {mask: tMask, wid: warp.wid, pc: takenPc};
     let nTWarp = Warp {mask: nTMask, wid: warp.wid, pc: warp.pc};
-    if (tMask != 0) warpIn.iport[2].put(tWarp);
-    if (nTMask != 0) warpIn.iport[3].put(nTWarp);
+    if (tMask != 0) warpIn.iport[1].put(tWarp);
+    if (nTMask != 0) warpIn.iport[2].put(nTWarp);
     brus.deq;
     brOut.deq;
   endrule
@@ -533,7 +524,7 @@ module mkCore(Core);
       lastWid <= wid;
       callOut.deq;
     end
-    warpIn.iport[6].put(Warp {mask: mask, wid: wid, pc: pc});
+    warpIn.iport[3].put(Warp {mask: mask, wid: wid, pc: pc});
     call.deq;
   endrule
 
@@ -583,11 +574,10 @@ module mkCore(Core);
     endfunction
     let lowerWid = warp.wid[0];
     let upperWid = warp.wid[logWarpNum-1 : 1];
-    RFReq#(ThreadNum) rfReq = RFReq {
-      write: True, conv: False, rs1: ?, rs2: ?, rd: dst, wid: upperWid, mask: warp.mask, datas: genWith(genData)
+    RFWrReq#(ThreadNum) rfReq = RFWrReq {
+      conv: False, rd: dst, wid: upperWid, mask: warp.mask, datas: genWith(genData)
     };
-    warpIn.iport[4].put(warp);
-    rfIn[lowerWid].iport[1].put(tuple2(rfReq, ?));
+    rfIn[lowerWid].iport[2].put(rfReq);
     memOut.deq;
   endmethod
 
@@ -597,11 +587,10 @@ module mkCore(Core);
     match CSRCont {warp: .warp, dst: .dst} = csrOut.first;
     let lowerWid = warp.wid[0];
     let upperWid = warp.wid[logWarpNum-1 : 1];
-    RFReq#(ThreadNum) rfReq = RFReq {
-      write: True, conv: False, rs1: ?, rs2: ?, rd: dst, wid: upperWid, mask: warp.mask, datas: resp.datas
+    RFWrReq#(ThreadNum) rfReq = RFWrReq {
+      conv: False, rd: dst, wid: upperWid, mask: warp.mask, datas: resp.datas
     };
-    warpIn.iport[5].put(warp);
-    rfIn[lowerWid].iport[2].put(tuple2(rfReq, ?));
+    rfIn[lowerWid].iport[3].put(rfReq);
     csrOut.deq;
   endmethod
 
