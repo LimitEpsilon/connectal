@@ -125,7 +125,7 @@ endinterface
 // note that I removed guards from first and deq in mkLatencyFifo; check notEmpty explicitly
 // why it's okay: we synchronize enq into execution unit and enq into STAGEOut
 // therefore if we can get a response from the execution unit, STAGEOut must be notEmpty
-// doSTAGE: dequeues from STAGEIn, enqueues to STAGEOut
+// do_STAGE: dequeues from STAGEIn, enqueues to STAGEOut
 // Assume execution units do more work at enq, and output is registered
 (* synthesize *)
 module mkCore(Core);
@@ -188,27 +188,35 @@ module mkCore(Core);
   let logWarpNum = valueOf(LogWarpNum);
 
   (* fire_when_enabled *)
-  rule doIF;
-    if (warps.notEmpty && iMemReq.notFull) begin
-      iMemReq.enq(warps.first);
-      warps.deq;
-    end else if ((lastIF || !warpIn[1].notEmpty) && warpIn[0].notEmpty) begin
-      let warp = warpIn[0].first;
-      if (iMemReq.notFull) iMemReq.enq(warp);
-      else warps.enq(warp);
+  rule do_IF;
+    Bool selected = warpIn[0].notEmpty || warpIn[1].notEmpty;
+    if (selected || (iMemReq.notFull && warps.notEmpty)) $display("do_IF");
+    Warp warp = ?;
+    // select warpIn to clear
+    if ((lastIF || !warpIn[1].notEmpty) && warpIn[0].notEmpty) begin
+      warp = warpIn[0].first;
       warpIn[0].deq;
       lastIF <= False;
     end else if (warpIn[1].notEmpty) begin
-      let warp = warpIn[1].first;
-      if (iMemReq.notFull) iMemReq.enq(warp);
-      else warps.enq(warp);
+      warp = warpIn[1].first;
       warpIn[1].deq;
       lastIF <= True;
+    end
+    // if warp can't be enqueued to iMemReq, enq to warps
+    if (selected && (!iMemReq.notFull || warps.notEmpty))
+      warps.enq(warp);
+    // enq to iMemReq
+    if (iMemReq.notFull) begin
+      if (warps.notEmpty) begin
+        iMemReq.enq(warps.first);
+        warps.deq;
+      end else if (selected)
+        iMemReq.enq(warp);
     end
   endrule
 
   (* fire_when_enabled *)
-  rule contIF;
+  rule cont_IF;
     match {.pc, .warp, .dInst} = iMemResp.first;
     match Warp {mask: .mask, wid: .wid, pc: .nTakenPc} = warp;
     match DecodedInst {
@@ -264,7 +272,7 @@ module mkCore(Core);
 
   for (Integer i = 0; i < 2; i = i + 1) begin
     (* fire_when_enabled *)
-    rule doRF;
+    rule do_RF;
       if (rfIn[i].notEmpty) begin
         $display("WB%0d", i);
         let wrReq = rfIn[i].first;
@@ -273,7 +281,7 @@ module mkCore(Core);
         rfIn[i].deq;
         lastWrite[i] <= True;
       end else if (scoreboards[i].notEmpty) begin
-        $display("doRF%0d", i);
+        $display("do_RF%0d", i);
         match {.rdReq, .cont} = scoreboards[i].first;
         match RFCont {iType: .iType, warp: .warp, takenPc: .takenPc, dst: .dst} = cont;
         RFWrReq#(ThreadNum) wrReq = RFWrReq {
@@ -297,8 +305,8 @@ module mkCore(Core);
     endrule
 
     (* fire_when_enabled *)
-    rule contRF;
-      $display("contRF%0d", i);
+    rule cont_RF;
+      $display("cont_RF%0d", i);
       match RFCont {
         warp: .warp,
         takenPc: .takenPc,
@@ -369,8 +377,8 @@ module mkCore(Core);
   end
 
   (* fire_when_enabled *)
-  rule doEX;
-    $display("doEX");
+  rule do_EX;
+    $display("do_EX");
     match {.req, .cont} = exIn.first;
     alus.enq(req);
     exOut.enq(cont);
@@ -378,8 +386,8 @@ module mkCore(Core);
   endrule
 
   (* fire_when_enabled *)
-  rule doMUL;
-    $display("doMUL");
+  rule do_MUL;
+    $display("do_MUL");
     match {.req, .cont} = mulIn.first;
     muls.enq(req);
     mulOut.enq(cont);
@@ -387,8 +395,8 @@ module mkCore(Core);
   endrule
 
   (* fire_when_enabled *)
-  rule doDIV;
-    $display("doDIV");
+  rule do_DIV;
+    $display("do_DIV");
     match {.req, .cont} = divIn.first;
     divs.enq(req);
     divOut.enq(cont);
@@ -396,8 +404,8 @@ module mkCore(Core);
   endrule
 
   (* fire_when_enabled *)
-  rule contEX;
-    $display("contEX");
+  rule cont_EX;
+    $display("cont_EX");
     match EXCont {warp: .warp, iType: .iType, memMask: .memMask, dst: .dst} =
       muls.notEmpty ? mulOut.first :
       (divs.notEmpty ? divOut.first : exOut.first);
@@ -457,8 +465,8 @@ module mkCore(Core);
   endrule
 
   (* fire_when_enabled *)
-  rule doBR;
-    $display("doBR");
+  rule do_BR;
+    $display("do_BR");
     match {.req, .cont} = brIn.first;
     brus.enq(req);
     brOut.enq(cont);
@@ -466,8 +474,8 @@ module mkCore(Core);
   endrule
 
   (* fire_when_enabled *)
-  rule contBR;
-    $display("contBR");
+  rule cont_BR;
+    $display("cont_BR");
     match BRCont {warp: .warp, takenPc: .takenPc} = brOut.first;
     let res = brus.first;
     let tMask = warp.mask & pack(res);
@@ -481,8 +489,8 @@ module mkCore(Core);
   endrule
 
   (* fire_when_enabled *)
-  rule doCALL;
-    $display("doCALL");
+  rule cont_CALL;
+    $display("cont_CALL");
     let curE = call.getEpoch;
     let epochEq = lastEpoch == curE;
     let wid = epochEq ? lastWid : callOut.first;
@@ -604,8 +612,8 @@ module mkProc(Proc);
   FIFOF#(void) done <- mkGFIFOF(False, True);
 
   (* fire_when_enabled *)
-  rule processIMem;
-    $display("processIMem");
+  rule process_iMem;
+    $display("process_iMem");
     let pc <- core.getIMemReq;
     MemoryRequest#(AddrSz, DataSz) req = MemoryRequest{
       write: False,
@@ -617,15 +625,15 @@ module mkProc(Proc);
   endrule
 
   (* fire_when_enabled *)
-  rule answerIMem;
-    $display("answerIMem");
+  rule answer_iMem;
+    $display("answer_iMem");
     let resp <- iMem.response.get;
     core.putIMemResp(resp.data);
   endrule
 
   (* fire_when_enabled *)
-  rule processDMem;
-    $display("processDMem");
+  rule process_dMem;
+    $display("process_dMem");
     let req <- core.getDMemReq;
     if (req.write && req.addresses[0] == 64) // {1'b1, mhartid[5:0]}: address for putchar
       putchars.enq(req.datas[0][7:0]);
@@ -634,36 +642,36 @@ module mkProc(Proc);
   endrule
 
   (* fire_when_enabled *)
-  rule answerDMem;
-    $display("answerDMem");
+  rule answer_dMem;
+    $display("answer_dMem");
     let resp <- dMem.response.get;
     core.putDMemResp(resp);
   endrule
 
   (* fire_when_enabled *)
-  rule processCsr;
-    $display("processCsr");
+  rule process_csr;
+    $display("process_csr");
     let req <- core.getCsrReq;
     csrf.putCsrReq(req);
   endrule
 
   (* fire_when_enabled *)
-  rule answerCsr;
-    $display("answerCsr");
+  rule answer_csr;
+    $display("answer_csr");
     let resp <- csrf.getCsrResp;
     core.putCsrResp(resp);
   endrule
 
   (* fire_when_enabled *)
-  rule processSched(csrf.started);
-    $display("processSched");
+  rule process_sched(csrf.started);
+    $display("process_sched");
     let req <- core.getSchedReq;
     scheduler.putSchedReq(req);
   endrule
 
   (* fire_when_enabled *)
-  rule answerSched;
-    $display("answerSched");
+  rule answer_sched;
+    $display("answer_sched");
     let resp <- scheduler.getSchedResp;
     core.start(resp);
   endrule

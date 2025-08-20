@@ -113,7 +113,8 @@ function DecodedInst decode(RawInst inst);
   // split/join are the only instructions with funct3 = x1x among the scheduling instructions
   let conv = { opcode[1:0], funct3[1] } == { opSched[1:0], fnSPLIT[1] };
 
-  // opOp or opSystem, used to select the second argument to give to the *alu*
+  // used to select the second argument to give to the *alu*
+  // opSched doesn't go through the alu, so it's okay
   let immValid = opcode[3:0] != opOp[3:0];
   let imm = case (opcode)
     opLui, opAuipc: immU;
@@ -124,7 +125,7 @@ function DecodedInst decode(RawInst inst);
   endcase;
 
   let dstValid = opcode != opBranch && opcode != opStore && opcode != opSched;
-  let src1Valid = opcode != opLui && opcode != opAuipc && opcode != opJal;
+  let src1Valid = opcode != opLui && opcode != opAuipc && opcode != opJal; // immU or immJ
   let src2Valid = opcode == opOp || !dstValid;
 
   let dInst = DecodedInst {
