@@ -25,7 +25,6 @@ typedef TExp#(LaneRIndxSz) RegPerLane;
 
 typedef struct {
   Bool    conv;
-  Bool    dstValid;
   RIndx   rs1;
   RIndx   rs2;
 } RFRdReq deriving (Bits, Eq, FShow);
@@ -98,11 +97,11 @@ module mkVecRFile(VectorRFile#(n));
     reqs.deq;
     if (write) begin
       for (Integer i = 0; i < valueOf(n); i = i + 1) begin
-        if (rd != 0 && unpack(mask[i]))
+        if ((rd != 0 || conv) && unpack(mask[i]))
           rfiles[i].portA.request.put(BRAMRequest {
             write: True,
             responseOnWrite: False,
-            address: {conv ? 0 : rd, wid},
+            address: {rd, wid},
             datain: datas[i]
           });
       end
@@ -199,11 +198,9 @@ module mkScoreboard(Scoreboard);
 
   for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1) begin
     match {.req, .cont} = ibuf[i];
-    // rs1 is always valid, rs2 is invalid only when immValid && dstValid
-    // dstValid means that iType != Sched
     Bool rs1Pending = unpack(pending[i][req.rs1]);
-    Bool rs2Pending = (!cont.immValid || !req.dstValid) && unpack(pending[i][req.rs2]);
-    Bool dstPending = req.dstValid && unpack(pending[i][cont.dst]);
+    Bool rs2Pending = !req.conv && unpack(pending[i][req.rs2]);
+    Bool dstPending = unpack(pending[i][cont.dst]);
     isPending[i] = rs1Pending || rs2Pending || dstPending;
   end
 
@@ -247,15 +244,19 @@ module mkScoreboard(Scoreboard);
 
   interface iport = inner;
   method Action deq(Bool write, Bit#(TSub#(LogWarpNum, 1)) wid, RIndx rd);
-    if (write) begin
-      Bit#(32) mask = ~(1 << rd);
-      pending[wid] <= pending[wid] & mask;
-    end else if (out[1] matches tagged Valid {.req, .cont}) begin
-      Bit#(TSub#(LogWarpNum, 1)) upperWid = cont.warp.wid[valueOf(LogWarpNum)-1 : 1];
-      Bit#(32) mask = extend(pack(req.dstValid)) << cont.dst;
-      pending[upperWid] <= pending[upperWid] | {mask[31 : 1], 1'b0};
+    let notEmpty = isValid(out[1]);
+    match {.req, .cont} = fromMaybe(?, out[1]);
+    let idx = write ? wid : cont.warp.wid[valueOf(LogWarpNum)-1 : 1];
+    let curPending = pending[idx];
+    // if !write && !notEmpty, (notEmpty << cont.dst) == 0, so pending[idx] doesn't change
+    // if cont.dst == 0, it is cleared out anyway
+    let nextPending =
+      write
+      ? curPending & ~(1 << rd)
+      : curPending | (extend(pack(notEmpty)) << cont.dst);
+    pending[idx] <= {nextPending[31 : 1], 1'b0};
+    if (!write && notEmpty)
       out[1] <= tagged Invalid;
-    end
   endmethod
   method first if (isValid(out[1])) = fromMaybe(?, out[1]);
   method notEmpty = isValid(out[1]);

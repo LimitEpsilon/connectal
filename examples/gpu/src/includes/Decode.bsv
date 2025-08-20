@@ -123,9 +123,9 @@ function DecodedInst decode(RawInst inst);
     default: immI;
   endcase;
 
-  // among instructions that go to the scoreboard, should the rd field be considered?
-  // also, instructions such that immValid == True but uses rs2
   let dstValid = opcode != opBranch && opcode != opStore && opcode != opSched;
+  let src1Valid = opcode != opLui && opcode != opAuipc && opcode != opJal;
+  let src2Valid = opcode == opOp || !dstValid;
 
   let dInst = DecodedInst {
     iType: iType,
@@ -134,10 +134,9 @@ function DecodedInst decode(RawInst inst);
     brFunc: brFunc, // only used by branch instructions
     conv: conv,
     predN: rd != 0 && rs2 != 0, // if pred, rs2 != 0. if split, rd != 0
-    dstValid: dstValid,
-    dst: rd,
-    src1: opcode == opLui ? 0 : rs1, // LUI is the only instruction using immU that goes to the RF
-    src2: rs2,
+    dst: dstValid ? rd : 0,
+    src1: src1Valid ? rs1 : 0,
+    src2: src2Valid ? rs2 : 0,
     csr: truncate(immI),
     immValid: immValid,
     imm: imm

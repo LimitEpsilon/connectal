@@ -86,17 +86,17 @@ module mkConnectalWrapper#(HostInterface host, ConnectalProcIndication ind) (Con
   Clock ddr4clk0 = ddr4_ctrl_0.user.clock;
   Reset ddr4rstn0 = ddr4_ctrl_0.user.reset_n;
 
-  let ddrServer <- mkDDR4ServerSync(ddr4_ctrl_0.user, ddr4clk0, ddr4rstn0, curr_clk, curr_rst_n);
-  let ddrInit <- mkMemInitDDR(ddrServer);
-
   // DDR4 C2
   let sys_clk2 = host.tsys_clk1_300mhz_buf;
   let sys_rst2 <- mkAsyncResetFromCR(20, sys_clk2);
 
   DDR4_Controller_VCU108 ddr4_ctrl_1 <- mkDDR4Controller_VCU108(defaultValue, clocked_by sys_clk2, reset_by sys_rst2);
 
-//  Clock ddr4clk1 = ddr4_ctrl_1.user.clock;
-//  Reset ddr4rstn1 = ddr4_ctrl_1.user.reset_n;
+  Clock ddr4clk1 = ddr4_ctrl_1.user.clock;
+  Reset ddr4rstn1 = ddr4_ctrl_1.user.reset_n;
+
+  let ddrServer <- mkDDR4ServerSync(ddr4_ctrl_1.user, ddr4clk1, ddr4rstn1, curr_clk, curr_rst_n);
+  let ddrInit <- mkMemInitDDR(ddrServer);
 
 //  let ddr_cli_300mhz_1 <- mkDDR4ClientSync(ddr_clients[1], curr_clk, curr_rst_n, ddr4clk1, ddr4rstn1);
 //  mkConnection(ddr_cli_300mhz_1, ddr4_ctrl_1.user);

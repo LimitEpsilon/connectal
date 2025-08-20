@@ -157,7 +157,6 @@ typedef struct {
   BrFunc   brFunc;
   Bool     conv; // split or join
   Bool     predN;
-  Bool     dstValid;
   RIndx    dst;
   RIndx    src1;
   RIndx    src2;

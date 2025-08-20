@@ -58,7 +58,7 @@ module mkCsrFile(CsrFile#(ThreadNum));
   rule count (startReg);
     cycles <= cycles + 1;
     $display("\nCycle %d ----------------------------------------------------", cycles);
-//    if (cycles > 4000) $finish;
+//    if (cycles > 10000) $finish;
   endrule
 
   // MMIO, sequentialized as RMW
