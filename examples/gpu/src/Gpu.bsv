@@ -30,8 +30,8 @@ import MergeTree::*;
 typedef TMul#(ThreadNum, WarpNum) MaxDivergence;
 
 (* synthesize *)
-module mkCall(CoalTree#(ThreadNum, AddrSz, void));
-  function void merge(void x, void y) = x;
+module mkCall(CoalTree#(ThreadNum, AddrSz, WarpId));
+  function WarpId merge(WarpId x, WarpId y) = x;
   let t <- mkCoalTree(merge);
   return t;
 endmodule
@@ -130,7 +130,7 @@ endinterface
 (* synthesize *)
 module mkCore(Core);
   // IF
-  FIFOF#(Warp) iMemReq <- mkBypassFIFOF;
+  Fifo#(1, Warp) iMemReq <- mkBypassFifo(False, True);
   Reg#(Bool) lastIF <- mkReg(False);
   FIFOF#(Tuple3#(Addr, Warp, DecodedInst)) iMemResp <- mkFIFOF;
   // RF, WB
@@ -154,30 +154,25 @@ module mkCore(Core);
   Vector#(2, Scoreboard) scoreboards <- replicateM(mkScoreboard);
   // from RF, EX, MEM, CSR, START
   let rfIn <- mkRfIn;
-  Vector#(2, Reg#(Bool)) lastWrite <- replicateM(mkReg(False));
-  Vector#(2, FIFOF#(RFCont)) rfOut <- replicateM(mkLFIFOF);
+  Vector#(2, FIFOF#(RFCont)) rfOut <- replicateM(mkGFIFOF(False, True));
   // from RF
   let schedIn <- mkSchedIn;
   // from RF
   let exIn <- mkExIn;
-  Fifo#(2, EXCont) exOut <- mkPipelineFifo(True, False);
+  Fifo#(3, EXCont) exOut <- mkCFFifo(True, False);
   // from RF
   let mulIn <- mkMulIn;
   Fifo#(5, EXCont) mulOut <- mkLatencyFifo(True, False);
   // from RF
   let divIn <- mkDivIn;
   Fifo#(TAdd#(1, DivStage), EXCont) divOut <- mkLatencyFifo(True, False);
-  Vector#(2, FIFOF#(Vector#(ThreadNum, Data))) stData <- replicateM(mkGFIFOF(False, True));
+  Vector#(2, Fifo#(8, Vector#(ThreadNum, Data))) stData <- replicateM(mkBRAMFifo(True, False));
   // from RF
   let brIn <- mkBrIn;
-  Fifo#(2, BRCont) brOut <- mkPipelineFifo(True, False);
-  // CALL
-  Reg#(Bool) lastEpoch <- mkReg(False);
-  Reg#(WarpId) lastWid <- mkReg(?);
-  Fifo#(TAdd#(1, TLog#(ThreadNum)), WarpId) callOut <- mkLatencyFifo(True, False);
+  Fifo#(3, BRCont) brOut <- mkCFFifo(True, False);
   // from EX
   let memIn <- mkMemIn;
-  Fifo#(2, MEMCont) memOut <- mkLatencyFifo(True, False);
+  Fifo#(8, MEMCont) memOut <- mkBRAMFifo(True, False);
   // from RF
   let csrIn <- mkCsrIn;
   FIFOF#(CSRCont) csrOut <- mkGFIFOF(False, True);
@@ -279,7 +274,6 @@ module mkCore(Core);
         rfs[i].ask.put(fromWrReq(wrReq));
         scoreboards[i].deq(True, wrReq.wid, wrReq.rd);
         rfIn[i].deq;
-        lastWrite[i] <= True;
       end else if (scoreboards[i].notEmpty) begin
         $display("do_RF%0d", i);
         match {.rdReq, .cont} = scoreboards[i].first;
@@ -300,7 +294,6 @@ module mkCore(Core);
           end
         endcase
         scoreboards[i].deq(False, ?, ?);
-        lastWrite[i] <= False;
       end
     endrule
 
@@ -329,21 +322,19 @@ module mkCore(Core);
       let idx = fromMaybe(?, findIndex(id, unpack(warp.mask)));
       let rs1 = rv1[idx];
       let rs2 = rv2[idx];
-
-      let pred = pack(map(lsb, rv1)) ^ pack(replicate(predN));
-
       $display("pc+4: %x, wid: %d, rs1: %x, rs2: %x", warp.pc, warp.wid, rs1, rs2);
 
-      AluReq#(ThreadNum) exReq = AluReq {
-        f: aluFunc,
-        v1: rv1,
-        v2: immValid ? replicate(imm) : rv2
-      };
+      let pred = pack(map(lsb, rv1)) ^ pack(replicate(predN));
       SchedReq schedReq = SchedReq {
         warp: warp,
         f: funct3,
         v1: (funct3 == fnPRED || funct3 == fnSPLIT) ? zeroExtend(pred) : rs1,
         v2: rs2
+      };
+      AluReq#(ThreadNum) exReq = AluReq {
+        f: aluFunc,
+        v1: rv1,
+        v2: immValid ? replicate(imm) : rv2
       };
       EXCont exCont = EXCont {warp: warp, iType: iType, memMask: memMask, dst: dst};
       BruReq#(ThreadNum) brReq = BruReq {f: brFunc, v1: rv1, v2: rv2};
@@ -432,26 +423,19 @@ module mkCore(Core);
     };
     let memCont = MEMCont {warp: warp, sign: sign, byteen: en, dst: dst};
 
-    function Maybe#(KV#(k, void)) filt(Bool v, Bit#(k) x);
-      let kv = KV {key: x, val: ?};
-      return v ? tagged Valid kv : tagged Invalid;
+    function Maybe#(KV#(AddrSz, WarpId)) genCall(Integer i);
+      let kv = KV {key: res[i], val: warp.wid};
+      return warp.mask[i] == 1 ? tagged Valid kv : tagged Invalid;
     endfunction
 
     case (iType)
-      Alu, MulDiv: begin
+      Alu, MulDiv, Jr: begin
         rfIn[lowerWid].iport[1].put(rfReq);
+        if (iType == Jr) call.enq(genWith(genCall));
       end
-      Ld, LdMask: begin
+      default: begin
         memIn.iport[0].put(tuple2(memReq, memCont));
-      end
-      St, StMask: begin
-        memIn.iport[0].put(tuple2(memReq, memCont));
-        stData[lowerWid].deq;
-      end
-      Jr: begin
-        rfIn[lowerWid].iport[1].put(rfReq);
-        call.enq(zipWith(filt, unpack(warp.mask), res));
-        callOut.enq(warp.wid);
+        if (isWrite) stData[lowerWid].deq;
       end
     endcase
 
@@ -491,17 +475,8 @@ module mkCore(Core);
   (* fire_when_enabled *)
   rule cont_CALL;
     $display("cont_CALL");
-    let curE = call.getEpoch;
-    let epochEq = lastEpoch == curE;
-    let wid = epochEq ? lastWid : callOut.first;
-    match CoalResp {mask: .mask, kv: KV {key: .pc}} = call.first;
+    match CoalResp {mask: .mask, kv: KV {key: .pc, val: .wid}} = call.first;
     $display("pc from CALL: %x", pc);
-    if (!epochEq) begin
-      $display("epoch not equal, changing warp to %d", wid);
-      lastEpoch <= curE;
-      lastWid <= wid;
-      callOut.deq;
-    end
     let warp = Warp {mask: mask, wid: wid, pc: pc};
     warpIn[wid[0]].iport[3].put(warp);
     call.deq;
@@ -585,12 +560,13 @@ module mkCore(Core);
 
   method Action start(SchedResp resp);
     match SchedResp {warp: .warp, write: .write, top: .top} = resp;
+    let lowerWid = warp.wid[0];
     let upperWid = warp.wid[logWarpNum-1 : 1];
     RFWrReq#(ThreadNum) rfReq = RFWrReq {
       conv: True, rd: 0, mask: warp.mask, wid: upperWid, datas: replicate(top)
     };
-    if (write) rfIn[warp.wid[0]].iport[4].put(rfReq);
-    warpIn[warp.wid[0]].iport[4].put(warp);
+    if (write) rfIn[lowerWid].iport[4].put(rfReq);
+    warpIn[lowerWid].iport[4].put(warp);
   endmethod
 endmodule
 

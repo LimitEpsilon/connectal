@@ -86,9 +86,9 @@ endmodule
 module mkVecRFile(VectorRFile#(n));
   Vector#(n, BRAM2Port#(LaneRIndx, Data)) rfiles <- replicateM(mkRFileBRAM);
 	FIFOF#(RFReq#(n)) reqs <- mkBypassFIFOF;
-	FIFOF#(Bool) respAisZero <- mkLFIFOF;
+	FIFOF#(Bool) respAisZero <- mkGFIFOF(False, True);
 	FIFOF#(Vector#(n, Data)) respA <- mkBypassFIFOF;
-	FIFOF#(Bool) respBisZero <- mkLFIFOF;
+	FIFOF#(Bool) respBisZero <- mkGFIFOF(False, True);
 	FIFOF#(Vector#(n, Data)) respB <- mkBypassFIFOF;
 
   (* fire_when_enabled *)
