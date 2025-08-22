@@ -16,7 +16,6 @@ import Vector::*;
 import FIFOF::*;
 import SpecialFIFOs::*;
 import BRAM::*;
-import MergeTree::*;
 
 // 32 * (number of warps) ÷ 2 registers per lane
 typedef TAdd#(4, LogWarpNum) LaneRIndxSz;
@@ -187,59 +186,34 @@ endinterface
 module mkScoreboard(Scoreboard);
   (* hide *) Reg#(Maybe#(Tuple2#(RFRdReq, RFCont))) out[2] <- mkCReg(2, tagged Invalid);
   (* hide *) Vector#(TDiv#(WarpNum, 2), Reg#(Tuple2#(RFRdReq, RFCont))) ibuf <- replicateM(mkRegU);
-  (* hide *) Reg#(Bool) cur[2] <- mkCReg(2, False); // current epoch
   (* hide *) Vector#(TDiv#(WarpNum, 2), Reg#(Bit#(32))) pending <- replicateM(mkReg(0));
-  Vector#(TDiv#(WarpNum, 2), Array#(Reg#(Epoch))) iports <-
-    replicateM(mkCReg(2, Epoch {epoch: False, valid: False}));
+  Vector#(TDiv#(WarpNum, 2), Array#(Reg#(Bool))) valid <- replicateM(mkCReg(2, False));
   Vector#(TDiv#(WarpNum, 2), Put#(Tuple2#(RFRdReq, RFCont))) inner;
-  Vector#(TDiv#(WarpNum, 2), Bool) isPending;
-  Vector#(TDiv#(WarpNum, 2), Bool) epochF;
-  Vector#(TDiv#(WarpNum, 2), Bool) epochT;
-
-  for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1) begin
-    match {.req, .cont} = ibuf[i];
-    Bool rs1Pending = unpack(pending[i][req.rs1]);
-    Bool rs2Pending = !req.conv && unpack(pending[i][req.rs2]);
-    Bool dstPending = unpack(pending[i][cont.dst]);
-    isPending[i] = rs1Pending || rs2Pending || dstPending;
-  end
-
-  for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1) begin
-    match Epoch {epoch: .epoch, valid: .valid} = iports[i][0];
-    epochF[i] = epoch ? False : valid && !isPending[i];
-  end
-
-  for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1) begin
-    match Epoch {epoch: .epoch, valid: .valid} = iports[i][0];
-    epochT[i] = epoch ? valid && !isPending[i] : False;
-  end
 
   for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1)
     inner[i] =
       interface Put;
-        method Action put(x) if (!iports[i][1].valid);
-          iports[i][1] <= Epoch {epoch: !cur[1], valid: True};
+        method Action put(x) if (!valid[i][1]);
+          valid[i][1] <= True;
           ibuf[i] <= x;
         endmethod
       endinterface;
 
   (* fire_when_enabled, no_implicit_conditions *)
   rule enq_out(!isValid(out[0]));
-    let idxF = findIndex(id, epochF);
-    let idxT = findIndex(id, epochT);
-    let idx =
-      case (tuple2(idxF, idxT)) matches
-        {tagged Valid .iF, tagged Valid .iT}: cur[0] ? iT : iF;
-        {tagged Valid .iF, tagged Invalid}: iF;
-        {tagged Invalid, tagged Valid .iT}: iT;
-        default: 0;
-      endcase;
-    if (isValid(idxF) || isValid(idxT)) begin
-      iports[idx][0].valid <= False;
-      out[0] <= tagged Valid ibuf[idx];
+    function Bool genIdx(Integer i);
+      match {.req, .cont} = ibuf[i];
+      Bool rs1Pending = unpack(pending[i][req.rs1]);
+      Bool rs2Pending = !req.conv && unpack(pending[i][req.rs2]);
+      Bool dstPending = unpack(pending[i][cont.dst]);
+      return valid[i][0] && !rs1Pending && !rs2Pending && !dstPending;
+    endfunction
+    Vector#(TDiv#(WarpNum, 2), Bool) isReady = genWith(genIdx);
+    let idx = findIndex(id, isReady);
+    if (idx matches tagged Valid .i) begin
+      valid[i][0] <= False;
+      out[0] <= tagged Valid ibuf[i];
     end
-    if (!isValid(idxF) || !isValid(idxT))
-      cur[0] <= isValid(idxT);
   endrule
 
   interface iport = inner;
