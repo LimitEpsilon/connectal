@@ -48,7 +48,7 @@ module mkBypassBRAM(BRAM2Port#(a, t)) provisos (Bits#(a, l), Bits#(t, tSz));
 
     // bypass when there is a write, and the requested addresses are the same
     bypassValid <= ((isReqA && wrA) || (isReqB && wrB)) && addrEq;
-    bypass <= wrB ? dataB : dataA;
+    bypass <= isReqB && wrB ? dataB : dataA;
 
     // update control registers
     addressA <= pack(addrA);
