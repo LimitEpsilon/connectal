@@ -15,6 +15,7 @@ import ProcTypes::*;
 import Vector::*;
 import FIFOF::*;
 import SpecialFIFOs::*;
+import Fifo::*;
 import BRAM::*;
 
 // 32 * (number of warps) ÷ 2 registers per lane
@@ -84,11 +85,11 @@ endmodule
 
 module mkVecRFile(VectorRFile#(n));
   Vector#(n, BRAM2Port#(LaneRIndx, Data)) rfiles <- replicateM(mkRFileBRAM);
-	FIFOF#(RFReq#(n)) reqs <- mkBypassFIFOF;
-	FIFOF#(Bool) respAisZero <- mkGFIFOF(False, True);
-	FIFOF#(Vector#(n, Data)) respA <- mkBypassFIFOF;
-	FIFOF#(Bool) respBisZero <- mkGFIFOF(False, True);
-	FIFOF#(Vector#(n, Data)) respB <- mkBypassFIFOF;
+  Fifo#(4, RFReq#(n)) reqs <- mkBRAMFifo(True, True);
+  FIFOF#(Bool) respAisZero <- mkGFIFOF(False, True);
+  FIFOF#(Vector#(n, Data)) respA <- mkBypassFIFOF;
+  FIFOF#(Bool) respBisZero <- mkGFIFOF(False, True);
+  FIFOF#(Vector#(n, Data)) respB <- mkBypassFIFOF;
 
   (* fire_when_enabled *)
   rule req_BRAM;
@@ -184,35 +185,33 @@ endinterface
 
 (* synthesize *)
 module mkScoreboard(Scoreboard);
+  // The correctness of this module depends on the output FIFO containing only one continuation
+  // This is because we update the pending register when the continuation is dequeued
   (* hide *) Reg#(Maybe#(Tuple2#(RFRdReq, RFCont))) out[2] <- mkCReg(2, tagged Invalid);
-  (* hide *) Vector#(TDiv#(WarpNum, 2), Reg#(Tuple2#(RFRdReq, RFCont))) ibuf <- replicateM(mkRegU);
+  (* hide *) Vector#(TDiv#(WarpNum, 2), Fifo#(4, Tuple2#(RFRdReq, RFCont))) ibuf <- replicateM(mkBRAMFifo(False, False));
   (* hide *) Vector#(TDiv#(WarpNum, 2), Reg#(Bit#(32))) pending <- replicateM(mkReg(0));
-  Vector#(TDiv#(WarpNum, 2), Array#(Reg#(Bool))) valid <- replicateM(mkCReg(2, False));
   Vector#(TDiv#(WarpNum, 2), Put#(Tuple2#(RFRdReq, RFCont))) inner;
 
   for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1)
     inner[i] =
       interface Put;
-        method Action put(x) if (!valid[i][1]);
-          valid[i][1] <= True;
-          ibuf[i] <= x;
-        endmethod
+        method Action put(x) if (ibuf[i].notFull) = ibuf[i].enq(x);
       endinterface;
 
   (* fire_when_enabled, no_implicit_conditions *)
   rule enq_out(!isValid(out[0]));
     function Bool genIdx(Integer i);
-      match {.req, .cont} = ibuf[i];
+      match {.req, .cont} = ibuf[i].first;
       Bool rs1Pending = unpack(pending[i][req.rs1]);
       Bool rs2Pending = !req.conv && unpack(pending[i][req.rs2]);
       Bool dstPending = unpack(pending[i][cont.dst]);
-      return valid[i][0] && !rs1Pending && !rs2Pending && !dstPending;
+      return ibuf[i].notEmpty && !rs1Pending && !rs2Pending && !dstPending;
     endfunction
     Vector#(TDiv#(WarpNum, 2), Bool) isReady = genWith(genIdx);
     let idx = findIndex(id, isReady);
     if (idx matches tagged Valid .i) begin
-      valid[i][0] <= False;
-      out[0] <= tagged Valid ibuf[i];
+      out[0] <= tagged Valid ibuf[i].first;
+      ibuf[i].deq;
     end
   endrule
 
