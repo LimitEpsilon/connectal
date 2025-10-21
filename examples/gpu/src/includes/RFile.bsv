@@ -32,7 +32,6 @@ typedef struct {
 typedef struct {
   Bool    conv;
   RIndx   rd;
-  Bit#(TSub#(LogWarpNum, 1))  wid;
   Bit#(n) mask;
   Vector#(n, Data) datas;
 } RFWrReq#(numeric type n) deriving (Bits, Eq, FShow);
@@ -43,25 +42,21 @@ typedef struct {
   RIndx   rs1;
   RIndx   rs2;
   RIndx   rd;
-  Bit#(TSub#(LogWarpNum, 1))  wid;
   Bit#(n) mask;
   Vector#(n, Data) datas;
 } RFReq#(numeric type n) deriving (Bits, Eq, FShow);
 
-function RFReq#(ThreadNum) fromRdReq(RFRdReq req, RFCont cont);
+function RFReq#(ThreadNum) fromRdReq(RFRdReq req);
   match RFRdReq {conv: .conv, rs1: .rs1, rs2: .rs2} = req;
-  match RFCont {warp: .warp} = cont;
-  match Warp {wid: .wid, mask: .mask} = warp;
-  Bit#(TSub#(LogWarpNum, 1)) upperWid = wid[valueOf(LogWarpNum)-1 : 1];
   return RFReq {
-    write: False, conv: conv, rs1: rs1, rs2: rs2, rd: ?, wid: upperWid, mask: mask, datas: ?
+    write: False, conv: conv, rs1: rs1, rs2: rs2, rd: ?, mask: ?, datas: ?
   };
 endfunction
 
 function RFReq#(n) fromWrReq(RFWrReq#(n) req);
-  match RFWrReq {conv: .conv, rd: .rd, wid: .wid, mask: .mask, datas: .datas} = req;
+  match RFWrReq {conv: .conv, rd: .rd, mask: .mask, datas: .datas} = req;
   return RFReq {
-    write: True, conv: conv, rs1: ?, rs2: ?, rd: rd, wid: wid, mask: mask, datas: datas
+    write: True, conv: conv, rs1: ?, rs2: ?, rd: rd, mask: mask, datas: datas
   };
 endfunction
 
@@ -71,8 +66,9 @@ typedef struct {
 } RFResp#(numeric type n) deriving (Bits, Eq, FShow);
 
 interface VectorRFile#(numeric type n);
-  interface Put#(RFReq#(n)) ask;
-  interface Get#(RFResp#(n)) ans;
+  method Action ask(RFReq#(n) req, Bit#(TSub#(LogWarpNum, 1)) wid);
+  method ActionValue#(RFResp#(n)) ans;
+  method Action clear;
 endinterface
 
 (* synthesize *)
@@ -85,15 +81,31 @@ endmodule
 
 module mkVecRFile(VectorRFile#(n));
   Vector#(n, BRAM2Port#(LaneRIndx, Data)) rfiles <- replicateM(mkRFileBRAM);
-  Fifo#(4, RFReq#(n)) reqs <- mkBRAMFifo(True, True);
+  Fifo#(4, Tuple2#(RFReq#(n), Bit#(TSub#(LogWarpNum, 1)))) reqs <- mkBRAMFifo(True, True);
   FIFOF#(Bool) respAisZero <- mkGFIFOF(False, True);
   FIFOF#(Vector#(n, Data)) respA <- mkBypassFIFOF;
   FIFOF#(Bool) respBisZero <- mkGFIFOF(False, True);
   FIFOF#(Vector#(n, Data)) respB <- mkBypassFIFOF;
+  Reg#(Bool) noClear <- mkReg(True);
+
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule do_clear(!noClear);
+    for (Integer i = 0; i < valueOf(n); i = i + 1) begin
+      rfiles[i].portAClear;
+      rfiles[i].portBClear;
+    end
+    reqs.clear;
+    respAisZero.clear;
+    respA.clear;
+    respBisZero.clear;
+    respB.clear;
+    noClear <= True;
+  endrule
 
   (* fire_when_enabled *)
   rule req_BRAM;
-    match RFReq {write: .write, conv: .conv, rs1: .rs1, rs2: .rs2, rd: .rd, mask: .mask, wid: .wid, datas: .datas} = reqs.first;
+    match {.req, .wid} = reqs.first;
+    match RFReq {write: .write, conv: .conv, rs1: .rs1, rs2: .rs2, rd: .rd, mask: .mask, datas: .datas} = req;
     reqs.deq;
     if (write) begin
       for (Integer i = 0; i < valueOf(n); i = i + 1) begin
@@ -145,29 +157,25 @@ module mkVecRFile(VectorRFile#(n));
     respB.enq(resp);
   endrule
 
-  interface ask =
-    interface Put;
-      method Action put(RFReq#(n) req);
-        reqs.enq(req);
-      endmethod
-    endinterface;
+  method Action ask(RFReq#(n) req, Bit#(TSub#(LogWarpNum, 1)) wid);
+    reqs.enq(tuple2(req, wid));
+  endmethod
 
-  interface ans =
-    interface Get;
-      method ActionValue#(RFResp#(n)) get;
-        let rv1 = respA.first;
-        let rv1isZero = respAisZero.first;
-        let rv2 = respB.first;
-        let rv2isZero = respBisZero.first;
-        respA.deq;
-        respAisZero.deq;
-        respB.deq;
-        respBisZero.deq;
-        if (rv1isZero) rv1 = replicate(0);
-        if (rv2isZero) rv2 = replicate(0);
-        return RFResp {rv1: rv1, rv2: rv2};
-      endmethod
-    endinterface;
+  method ActionValue#(RFResp#(n)) ans;
+    let rv1 = respA.first;
+    let rv1isZero = respAisZero.first;
+    let rv2 = respB.first;
+    let rv2isZero = respBisZero.first;
+    respA.deq;
+    respAisZero.deq;
+    respB.deq;
+    respBisZero.deq;
+    if (rv1isZero) rv1 = replicate(0);
+    if (rv2isZero) rv2 = replicate(0);
+    return RFResp {rv1: rv1, rv2: rv2};
+  endmethod
+
+  method Action clear if (noClear); noClear <= False; endmethod
 endmodule
 
 (* synthesize *)
@@ -181,6 +189,7 @@ interface Scoreboard;
   method Action deq(Bool write, Bit#(TSub#(LogWarpNum, 1)) wid, RIndx rd);
   method Tuple2#(RFRdReq, RFCont) first;
   method Bool notEmpty;
+  method Action clear;
 endinterface
 
 (* synthesize *)
@@ -190,6 +199,7 @@ module mkScoreboard(Scoreboard);
   (* hide *) Reg#(Maybe#(Tuple2#(RFRdReq, RFCont))) out[2] <- mkCReg(2, tagged Invalid);
   (* hide *) Vector#(TDiv#(WarpNum, 2), Fifo#(4, Tuple2#(RFRdReq, RFCont))) ibuf <- replicateM(mkBRAMFifo(False, False));
   (* hide *) Vector#(TDiv#(WarpNum, 2), Reg#(Bit#(32))) pending <- replicateM(mkReg(0));
+  Reg#(Bool) noClear <- mkReg(True);
   Vector#(TDiv#(WarpNum, 2), Put#(Tuple2#(RFRdReq, RFCont))) inner;
 
   for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1)
@@ -215,8 +225,18 @@ module mkScoreboard(Scoreboard);
     end
   endrule
 
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule do_clear(!noClear);
+    out[1] <= tagged Invalid;
+    for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1) begin
+      ibuf[i].clear;
+      pending[i] <= 0;
+    end
+    noClear <= True;
+  endrule
+
   interface iport = inner;
-  method Action deq(Bool write, Bit#(TSub#(LogWarpNum, 1)) wid, RIndx rd);
+  method Action deq(Bool write, Bit#(TSub#(LogWarpNum, 1)) wid, RIndx rd) if (noClear);
     let notEmpty = isValid(out[1]);
     match {.req, .cont} = fromMaybe(?, out[1]);
     let idx = write ? wid : cont.warp.wid[valueOf(LogWarpNum)-1 : 1];
@@ -233,5 +253,6 @@ module mkScoreboard(Scoreboard);
   endmethod
   method first if (isValid(out[1])) = fromMaybe(?, out[1]);
   method notEmpty = isValid(out[1]);
+  method Action clear if (noClear); noClear <= False; endmethod
 endmodule
 

@@ -19,9 +19,9 @@ import Vector::*;
 typedef struct {
   CsrIndx csr;
   Bool write;
-  Vector#(n, Data) datas;
+  Data data;
   Bit#(LogWarpNum) wid;
-  Bit#(ThreadNum) mask;
+  Bit#(n) mask;
 } CsrReq#(numeric type n) deriving(Bits, Eq, FShow);
 
 typedef struct {
@@ -91,12 +91,10 @@ module mkCsrFile(CsrFile#(ThreadNum));
   endmethod
 
   method Action putCsrReq(CsrReq#(ThreadNum) req) if (startReg && !isPending);
-    match CsrReq {write: .wr, csr: .csr, datas: .datas, wid: .wid, mask: .mask} = req;
+    match CsrReq {write: .wr, csr: .csr, data: .data, wid: .wid, mask: .mask} = req;
     pendingAddr <= csr;
     if (wr) begin
-      let idx = findIndex(id, unpack(mask));
-      if (idx matches tagged Valid .i)
-        pending <= tagged Valid datas[i];
+      pending <= tagged Valid data;
       if (csr != csrMtohost) resps.enq(unpack(0));
     end else begin
       Vector#(ThreadNum, Data) rd;

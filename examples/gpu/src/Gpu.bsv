@@ -59,13 +59,13 @@ module mkIMemReq(MergeTree#(2, Warp));
 endmodule
 
 (* synthesize *)
-module mkOneRfIn(MergeTree#(5, RFWrReq#(ThreadNum)));
+module mkOneRfIn(MergeTree#(5, Tuple2#(RFWrReq#(ThreadNum), Bit#(TSub#(LogWarpNum, 1)))));
   let t <- mkMergeTree;
   return t;
 endmodule
 
 function
-  Module#(Vector#(2, MergeTree#(5, RFWrReq#(ThreadNum))))
+  Module#(Vector#(2, MergeTree#(5, Tuple2#(RFWrReq#(ThreadNum), Bit#(TSub#(LogWarpNum, 1))))))
   mkRfIn = replicateM(mkOneRfIn);
 
 (* synthesize *)
@@ -120,6 +120,7 @@ interface Core;
   method Action putIMemResp(Data resp);
   method Action putCsrResp(CsrResp#(ThreadNum) resp);
   method Action start(SchedResp resp);
+  method Action clear;
 endinterface
 
 // note that I removed guards from first and deq in mkLatencyFifo; check notEmpty explicitly
@@ -179,11 +180,16 @@ module mkCore(Core);
 
   // signal error
   FIFOF#(void) error <- mkFIFOF;
+  // signal clear
+  Reg#(Bool) noClear <- mkReg(True);
 
   let logWarpNum = valueOf(LogWarpNum);
 
+  // the clear method will drain all warps ready to be issued
+  // we might need to introduce an epoch to distinguish btwn warps being cleared
+  // and warps being submitted
   (* fire_when_enabled *)
-  rule do_IF;
+  rule do_IF(noClear);
     Bool selected = warpIn[0].notEmpty || warpIn[1].notEmpty;
     if (selected || (iMemReq.notFull && warps.notEmpty)) $display("do_IF");
     Warp warp = ?;
@@ -197,11 +203,15 @@ module mkCore(Core);
       warpIn[1].deq;
       lastIF <= True;
     end
+
+    // only enqueue warps with nonzero masks
+    selected = selected && warp.mask != 0;
     // if warp can't be enqueued to iMemReq, enq to warps
     if (selected && (!iMemReq.notFull || warps.notEmpty))
       warps.enq(warp);
     // enq to iMemReq
     if (iMemReq.notFull) begin
+      // warps only contains valid warps with nonzero masks
       if (warps.notEmpty) begin
         iMemReq.enq(warps.first);
         warps.deq;
@@ -252,15 +262,18 @@ module mkCore(Core);
       dst: dst
     };
 
-    // signal error
-    if (iType == Unsupported)
-      error.enq(?);
     // enq into warpIn
     if (iType == J)
       warpIn[lowerWid].iport[0].put(Warp {mask: mask, wid: wid, pc: takenPc});
-    // enq into scoreboard
-    if (iType != Fence)
-      scoreboards[lowerWid].iport[upperWid].put(tuple2(rdReq, rfCont));
+
+    case (iType)
+      // signal error
+      Unsupported: error.enq(?);
+      Fence: noAction;
+      // enq into scoreboard
+      default:
+        scoreboards[lowerWid].iport[upperWid].put(tuple2(rdReq, rfCont));
+    endcase
 
     iMemResp.deq;
   endrule
@@ -270,9 +283,9 @@ module mkCore(Core);
     rule do_RF;
       if (rfIn[i].notEmpty) begin
         $display("WB%0d", i);
-        let wrReq = rfIn[i].first;
-        rfs[i].ask.put(fromWrReq(wrReq));
-        scoreboards[i].deq(True, wrReq.wid, wrReq.rd);
+        match {.wrReq, .wid} = rfIn[i].first;
+        rfs[i].ask(fromWrReq(wrReq), wid);
+        scoreboards[i].deq(True, wid, wrReq.rd);
         rfIn[i].deq;
       end else if (scoreboards[i].notEmpty) begin
         $display("do_RF%0d", i);
@@ -281,15 +294,15 @@ module mkCore(Core);
         RFWrReq#(ThreadNum) wrReq = RFWrReq {
           conv: False,
           rd: dst,
-          wid: warp.wid[logWarpNum-1 : 1],
           mask: warp.mask,
           datas: replicate(iType == J ? warp.pc : takenPc)
         };
+        let upperWid = warp.wid[logWarpNum-1 : 1];
 
         case (iType)
-          J, Auipc: rfIn[i].iport[0].put(wrReq);
+          J, Auipc: rfIn[i].iport[0].put(tuple2(wrReq, upperWid));
           default: begin
-            rfs[i].ask.put(fromRdReq(rdReq, cont));
+            rfs[i].ask(fromRdReq(rdReq), upperWid);
             rfOut[i].enq(cont);
           end
         endcase
@@ -313,7 +326,7 @@ module mkCore(Core);
         csr: .csr,
         dst: .dst
       } = rfOut[i].first;
-      match RFResp {rv1: .rv1, rv2: .rv2} <- rfs[i].ans.get;
+      match RFResp {rv1: .rv1, rv2: .rv2} <- rfs[i].ans;
 
       Bit#(3) funct3 = pack(mFunc);
       MemMask memMask = unpack({funct3[2], funct3[0]});
@@ -339,7 +352,7 @@ module mkCore(Core);
       EXCont exCont = EXCont {warp: warp, iType: iType, memMask: memMask, dst: dst};
       BruReq#(ThreadNum) brReq = BruReq {f: brFunc, v1: rv1, v2: rv2};
       BRCont brCont = BRCont {warp: warp, takenPc: takenPc};
-      CsrReq#(ThreadNum) csrReq = CsrReq {wid: warp.wid, mask: warp.mask, csr: csr, write: iType == Csrw, datas: rv1};
+      CsrReq#(ThreadNum) csrReq = CsrReq {wid: warp.wid, mask: warp.mask, csr: csr, write: iType == Csrw, data: rs1};
       CSRCont csrCont = CSRCont {warp : warp, dst: dst};
 
       case (iType)
@@ -405,7 +418,7 @@ module mkCore(Core);
     let upperWid = warp.wid[logWarpNum-1 : 1];
 
     RFWrReq#(ThreadNum) rfReq = RFWrReq {
-      conv: False, rd: dst, wid: upperWid, mask: warp.mask,
+      conv: False, rd: dst, mask: warp.mask,
       datas: iType == Jr ? replicate(warp.pc) : res
     };
 
@@ -430,7 +443,7 @@ module mkCore(Core);
 
     case (iType)
       Alu, MulDiv, Jr: begin
-        rfIn[lowerWid].iport[1].put(rfReq);
+        rfIn[lowerWid].iport[1].put(tuple2(rfReq, upperWid));
         if (iType == Jr) call.enq(genWith(genCall));
       end
       default: begin
@@ -482,6 +495,26 @@ module mkCore(Core);
     call.deq;
   endrule
 
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule do_clear(!noClear);
+    iMemReq.clear;
+    lastIF <= False;
+    warps.clear;
+    ifOut.clear;
+    exOut.clear;
+    mulOut.clear;
+    divOut.clear;
+    for (Integer i = 0; i < 2; i = i + 1) begin
+      rfOut[i].clear;
+      stData[i].clear;
+    end
+    brOut.clear;
+    memOut.clear;
+    csrOut.clear;
+    error.clear;
+    noClear <= True;
+  endrule
+
   method ActionValue#(MemReq#(ThreadNum)) getDMemReq;
     match {.req, .cont} = memIn.first;
     if (!req.write) memOut.enq(cont);
@@ -529,9 +562,9 @@ module mkCore(Core);
     let lowerWid = warp.wid[0];
     let upperWid = warp.wid[logWarpNum-1 : 1];
     RFWrReq#(ThreadNum) rfReq = RFWrReq {
-      conv: False, rd: dst, wid: upperWid, mask: warp.mask, datas: genWith(genData)
+      conv: False, rd: dst, mask: warp.mask, datas: genWith(genData)
     };
-    rfIn[lowerWid].iport[2].put(rfReq);
+    rfIn[lowerWid].iport[2].put(tuple2(rfReq, upperWid));
     memOut.deq;
   endmethod
 
@@ -552,9 +585,9 @@ module mkCore(Core);
     let lowerWid = warp.wid[0];
     let upperWid = warp.wid[logWarpNum-1 : 1];
     RFWrReq#(ThreadNum) rfReq = RFWrReq {
-      conv: False, rd: dst, wid: upperWid, mask: warp.mask, datas: resp.datas
+      conv: False, rd: dst, mask: warp.mask, datas: resp.datas
     };
-    rfIn[lowerWid].iport[3].put(rfReq);
+    rfIn[lowerWid].iport[3].put(tuple2(rfReq, upperWid));
     csrOut.deq;
   endmethod
 
@@ -563,10 +596,32 @@ module mkCore(Core);
     let lowerWid = warp.wid[0];
     let upperWid = warp.wid[logWarpNum-1 : 1];
     RFWrReq#(ThreadNum) rfReq = RFWrReq {
-      conv: True, rd: 0, mask: warp.mask, wid: upperWid, datas: replicate(top)
+      conv: True, rd: 0, mask: warp.mask, datas: replicate(top)
     };
-    if (write) rfIn[lowerWid].iport[4].put(rfReq);
+    if (write) rfIn[lowerWid].iport[4].put(tuple2(rfReq, upperWid));
     warpIn[lowerWid].iport[4].put(warp);
+  endmethod
+
+  method Action clear if (noClear);
+    for (Integer i = 0; i < 2; i = i + 1) begin
+      warpIn[i].clear;
+      rfIn[i].clear;
+      rfs[i].clear;
+      scoreboards[i].clear;
+    end
+    alus.clear;
+    muls.clear;
+    divs.clear;
+    brus.clear;
+    call.clear;
+    schedIn.clear;
+    exIn.clear;
+    mulIn.clear;
+    divIn.clear;
+    brIn.clear;
+    memIn.clear;
+    csrIn.clear;
+    noClear <= False;
   endmethod
 endmodule
 

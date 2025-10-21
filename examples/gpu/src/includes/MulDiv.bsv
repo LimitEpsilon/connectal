@@ -42,6 +42,7 @@ interface FMA;
   method Action enq(UInt#(MulWidth) a, UInt#(MulWidth) b, UInt#(AddWidth) c, Bool sub);
   method UInt#(TAdd#(1, AddWidth)) first; // unguarded
   method Action deq;
+  method Action clear;
 endinterface
 
 (* synthesize *)
@@ -50,11 +51,15 @@ module mkFMA (FMA);
   let computed <- mkReg(False);
   let latched <- mkReg(False);
   RWire#(void) deqReq <- mkRWire;
+  RWire#(void) clearReq <- mkRWire;
   RWire#(FMAReq) enqReq <- mkRWire;
 
   (* fire_when_enabled, no_implicit_conditions *)
   rule canonicalize;
-    if (enqReq.wget matches tagged Valid .req) begin
+    if (isValid(clearReq.wget)) begin
+      computed <= False;
+      latched <= False;
+    end else if (enqReq.wget matches tagged Valid .req) begin
       match FMAReq {a: .a, b: .b, c: .c, sub: .sub} = req;
       m.enq(a, b, c, sub);
       computed <= latched;
@@ -75,12 +80,17 @@ module mkFMA (FMA);
   method Action deq if (computed);
     deqReq.wset(?);
   endmethod
+
+  method Action clear;
+    clearReq.wset(?);
+  endmethod
 endmodule
 
 interface Mul32;
   method Action enq(Bool x_is_signed, Bit#(32) x, Bool y_is_signed, Bit#(32) y);
   method Bit#(64) first;
   method Action deq;
+  method Action clear;
 endinterface
 
 // latency 5
@@ -95,6 +105,7 @@ module mkMul32 (Mul32);
   Fifo#(2, Bit#(32)) lowerRes <- mkLatencyFifo(True, True);
   Fifo#(4, Bool) resNeg <- mkLatencyFifo(True, True);
   Fifo#(2, Bit#(64)) res <- mkCFFifo(True, True);
+  Reg#(Bool) noClear <- mkReg(True);
 
   (* fire_when_enabled *)
   rule compute_middle;
@@ -142,6 +153,20 @@ module mkMul32 (Mul32);
     resNeg.deq;
   endrule
 
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule do_clear(!noClear);
+    mulUpper.clear;
+    mulMiddle.clear;
+    mulLower.clear;
+    uxy.clear;
+    middleArgs.clear;
+    upperRes.clear;
+    lowerRes.clear;
+    resNeg.clear;
+    res.clear;
+    noClear <= True;
+  endrule
+
   method Action enq(Bool x_is_signed, Bit#(32) x, Bool y_is_signed, Bit#(32) y);
     Bool xNeg = x_is_signed && unpack(msb(x));
     Bool yNeg = y_is_signed && unpack(msb(y));
@@ -160,12 +185,14 @@ module mkMul32 (Mul32);
 
   method first = res.first;
   method Action deq; res.deq; endmethod
+  method Action clear if (noClear); noClear <= False; endmethod
 endmodule
 
 interface Div32;
   method Action enq(Bool num_is_signed, Bit#(32) num, Bool den_is_signed, Bit#(32) den);
   method Tuple2#(Bit#(32), Bit#(32)) first;
   method Action deq;
+  method Action clear;
 endinterface
 
 typedef struct {
@@ -210,6 +237,7 @@ module mkDiv32 (Div32);
   Vector#(DivStage, Reg#(Maybe#(DivRes))) res <- replicateM(mkReg(tagged Invalid));
   Fifo#(2, Tuple2#(Bit#(32), Bit#(32))) out <- mkCFFifo(False, False);
   RWire#(DivRes) enqReq <- mkRWire;
+  Reg#(Bool) noClear <- mkReg(True);
 
   function DivRes genDiv(Integer i) = divs[i](fromMaybe(?, res[i]));
   function Bool genVal(Integer i) = isValid(res[i]);
@@ -223,7 +251,7 @@ module mkDiv32 (Div32);
     notFull[i] = notFull[i+1] || !valid[i];
 
   (* fire_when_enabled, no_implicit_conditions *)
-  rule shift;
+  rule shift(noClear);
     if (res[divStage-1] matches tagged Valid .r) begin
       match DivRes {done: .done, qneg: .qneg, rneg: .rneg, quot: .quot, rem: .rem} = r;
       if (out.notFull && done) out.enq(tuple2(qneg ? -quot : quot, rneg ? -rem : rem));
@@ -239,6 +267,14 @@ module mkDiv32 (Div32);
       res[0] <= valid[0] ? tagged Valid stepped[0] : tagged Invalid;
   endrule
 
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule do_clear(!noClear);
+    for (Integer i = 0; i < divStage; i = i + 1)
+      res[i] <= tagged Invalid;
+    out.clear;
+    noClear <= True;
+  endrule
+
   method Action enq(Bool nsigned, Bit#(32) num, Bool dsigned, Bit#(32) den) if (notFull[0]);
     Bool nneg = nsigned && unpack(msb(num));
     Bool dneg = dsigned && unpack(msb(den));
@@ -252,5 +288,6 @@ module mkDiv32 (Div32);
 
   method first if (out.notEmpty) = out.first;
   method deq if (out.notEmpty) = out.deq;
+  method Action clear if (noClear); noClear <= False; endmethod
 endmodule
 
