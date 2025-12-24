@@ -66,10 +66,10 @@ module mkVecMemoryServer#(MemoryServer#(h, w8) m) (VecMemoryServer#(n, a, d) ifc
   CoalTree#(n, h, MemoryPayload#(w, subd)) c <- mkCoalTree(zipWith(merge));
   // final destination
   Vector#(n, FIFOF#(Vector#(d, Byte))) out <- replicateM(mkLFIFOF);
-  Fifo#(2, Bit#(n)) outMasks <- mkPipelineFifo(True, True);
+  Fifo#(24, Bit#(n)) outMasks <- mkPipelineFifo(True, True);
 
   // enq at CoalReq, deq at MemoryResponse
-  Vector#(n, Fifo#(2, Bit#(w))) offsets <- replicateM(mkPipelineFifo(False, False)); // unguarded, stores address[w-1 : 0]
+  Vector#(n, Fifo#(24, Bit#(w))) offsets <- replicateM(mkPipelineFifo(False, False)); // unguarded, stores address[w-1 : 0]
 
   // enq at CoalReq, deq at CoalResp
   Reg#(Bool) lastEpoch <- mkReg(False);
@@ -80,8 +80,8 @@ module mkVecMemoryServer#(MemoryServer#(h, w8) m) (VecMemoryServer#(n, a, d) ifc
   Reg#(Maybe#(MemoryRequest#(h, w8))) unalignedReq <- mkReg(tagged Invalid); // outstanding unaligned request
 
   // enq at MemoryRequest, deq at MemoryResponse
-  FIFOF#(Bit#(n)) respMasks <- mkLFIFOF;
-  FIFOF#(Bool) unalignedResp <- mkUGLFIFOF; // synchronized with respMasks
+  Fifo#(24, Bit#(n)) respMasks <- mkPipelineFifo(True, True);
+  Fifo#(24, Bool) unalignedResp <- mkPipelineFifo(False, False); // synchronized with respMasks
   Reg#(Bool) needWait <- mkReg(False); // need to wait for unaligned response
 
   // enq at MemoryResponse, deq at enq to out

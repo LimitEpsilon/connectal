@@ -72,6 +72,7 @@ interface VectorAlu#(numeric type n);
   method Bool notEmpty;
   method Vector#(n, Data) first;
   method Action deq;
+  method Action clear;
 endinterface
 
 (* synthesize *)
@@ -79,20 +80,28 @@ module mkVectorAlu(VectorAlu#(ThreadNum));
   Vector#(n, ScalarAlu) alus = replicate(alu);
   FIFOF#(AluReq#(ThreadNum)) reqs <- mkBypassFIFOF;
   FIFOF#(Vector#(ThreadNum, Data)) resps <- mkLFIFOF;
+  Reg#(Bool) noClear <- mkReg(True);
 
   (* fire_when_enabled *)
   rule compute_resp;
-    $display("compute_resp");
     let r = reqs.first;
     reqs.deq;
     function Data app(ScalarAlu a, Data v1, Data v2) = a(v1, v2, r.f);
     resps.enq(zipWith3(app, alus, r.v1, r.v2));
   endrule
 
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule do_clear(!noClear);
+    reqs.clear;
+    resps.clear;
+    noClear <= True;
+  endrule
+
   method Action enq(AluReq#(ThreadNum) req); reqs.enq(req); endmethod
   method Bool notEmpty = resps.notEmpty;
   method Vector#(ThreadNum, Data) first = resps.first;
   method Action deq; resps.deq; endmethod
+  method Action clear if (noClear); noClear <= False; endmethod
 endmodule
 
 typedef struct {
@@ -106,14 +115,16 @@ interface VectorMul#(numeric type n);
   method Bool notEmpty;
   method Vector#(n, Data) first;
   method Action deq;
+  method Action clear;
 endinterface
 
 (* synthesize *)
 module mkVectorMul(VectorMul#(ThreadNum));
-  Vector#(ThreadNum, Mul32) muls <- replicateM(mkMul32);
+  Vector#(ThreadNum, Multiplier#(DataSz)) muls <- replicateM(mkMul32);
   FIFOF#(MulReq#(ThreadNum)) reqs <- mkBypassFIFOF;
   Fifo#(5, Bool) respLower <- mkLatencyFifo(True, True);
   FIFOF#(Vector#(ThreadNum, Data)) resps <- mkBypassFIFOF;
+  Reg#(Bool) noClear <- mkReg(True);
   let req = reqs.notEmpty ? reqs.first : ?;
 
   (* fire_when_enabled *)
@@ -145,13 +156,25 @@ module mkVectorMul(VectorMul#(ThreadNum));
     end
     resps.enq(res);
     respLower.deq;
-    $display("compute_resp_mul");
+  endrule
+
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule do_clear(!noClear);
+    reqs.clear;
+    respLower.clear;
+    resps.clear;
+    noClear <= True;
   endrule
 
   method Action enq(MulReq#(ThreadNum) x); reqs.enq(x); endmethod
   method Bool notEmpty = resps.notEmpty;
   method Vector#(ThreadNum, Data) first = resps.first;
   method Action deq; resps.deq; endmethod
+  method Action clear if (noClear);
+    for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1)
+      muls[i].clear; // gets cleared after one clock cycle
+    noClear <= False;
+  endmethod
 endmodule
 
 typedef struct {
@@ -165,14 +188,16 @@ interface VectorDiv#(numeric type n);
   method Bool notEmpty;
   method Vector#(n, Data) first;
   method Action deq;
+  method Action clear;
 endinterface
 
 (* synthesize *)
 module mkVectorDiv(VectorDiv#(ThreadNum));
-  Vector#(ThreadNum, Div32) divs <- replicateM(mkDiv32);
+  Vector#(ThreadNum, Divider#(32)) divs <- replicateM(mkDiv32);
   FIFOF#(DivReq#(ThreadNum)) reqs <- mkBypassFIFOF;
   Fifo#(TAdd#(1, DivStage), Bool) respQuot <- mkLatencyFifo(True, True);
   FIFOF#(Vector#(ThreadNum, Data)) resps <- mkBypassFIFOF;
+  Reg#(Bool) noClear <- mkReg(True);
   let req = reqs.notEmpty ? reqs.first : ?;
 
   (* fire_when_enabled *)
@@ -197,13 +222,25 @@ module mkVectorDiv(VectorDiv#(ThreadNum));
     end
     resps.enq(res);
     respQuot.deq;
-    $display("compute_resp_div");
+  endrule
+
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule do_clear(!noClear);
+    reqs.clear;
+    respQuot.clear;
+    resps.clear;
+    noClear <= True;
   endrule
 
   method Action enq(DivReq#(ThreadNum) x); reqs.enq(x); endmethod
   method Bool notEmpty = resps.notEmpty;
   method Vector#(ThreadNum, Data) first = resps.first;
   method Action deq; resps.deq; endmethod
+  method Action clear if (noClear);
+    for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1)
+      divs[i].clear; // gets cleared after one clock cycle
+    noClear <= False;
+  endmethod
 endmodule
 
 typedef struct {
@@ -217,6 +254,7 @@ interface VectorBru#(numeric type n);
   method Bool notEmpty;
   method Vector#(n, Bool) first;
   method Action deq;
+  method Action clear;
 endinterface
 
 (* synthesize *)
@@ -224,6 +262,7 @@ module mkVectorBru(VectorBru#(ThreadNum));
   Vector#(ThreadNum, ScalarBru) brus = replicate(bru);
   FIFOF#(BruReq#(ThreadNum)) reqs <- mkBypassFIFOF;
   FIFOF#(Vector#(ThreadNum, Bool)) resps <- mkLFIFOF;
+  Reg#(Bool) noClear <- mkReg(True);
 
   (* fire_when_enabled *)
   rule compute_resp;
@@ -233,9 +272,19 @@ module mkVectorBru(VectorBru#(ThreadNum));
     resps.enq(zipWith3(app, brus, r.v1, r.v2));
   endrule
 
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule do_clear(!noClear);
+    reqs.clear;
+    resps.clear;
+    noClear <= True;
+  endrule
+
   method Action enq(BruReq#(ThreadNum) x); reqs.enq(x); endmethod
   method Bool notEmpty = resps.notEmpty;
   method Vector#(ThreadNum, Bool) first = resps.first;
   method Action deq; resps.deq; endmethod
+  method Action clear if (noClear);
+    noClear <= False;
+  endmethod
 endmodule
 

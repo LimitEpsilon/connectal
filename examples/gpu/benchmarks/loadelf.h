@@ -6,6 +6,8 @@
 // ================================================================
 // Standard C includes
 
+#pragma once
+
 #include <fcntl.h>
 #include <gelf.h>
 #include <inttypes.h>
@@ -14,9 +16,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include "ConnectalProcIndication.h"
-#include "ConnectalProcRequest.h"
+#ifdef __APPLE__
+#include <sys/syslimits.h>
+#else
+#include <limits.h>
+#endif
 
 // ================================================================
 // Memory buffer into which we load the ELF file before
@@ -98,10 +102,10 @@ static void c_mem_load_elf(const char *elf_filename, const char *start_symbol,
 
   // Is this a 32b or 64 ELF?
   if (gelf_getclass(e) == ELFCLASS32) {
-    fprintf(stdout, "c_mem_load_elf: %s is a 32-bit ELF file\n", elf_filename);
+    fprintf(stderr, "c_mem_load_elf: %s is a 32-bit ELF file\n", elf_filename);
     bitwidth = 32;
   } else if (gelf_getclass(e) == ELFCLASS64) {
-    fprintf(stdout, "c_mem_load_elf: %s is a 64-bit ELF file\n", elf_filename);
+    fprintf(stderr, "c_mem_load_elf: %s is a 64-bit ELF file\n", elf_filename);
     bitwidth = 64;
   } else {
     fprintf(stderr, "ERROR: c_mem_load_elf: ELF file '%s' is not 32b or 64b\n",
@@ -148,7 +152,7 @@ static void c_mem_load_elf(const char *elf_filename, const char *start_symbol,
     gelf_getshdr(scn, &shdr);
 
     char *sec_name = elf_strptr(e, shstrndx, shdr.sh_name);
-    fprintf(stdout, "Section %-16s: ", sec_name);
+    fprintf(stderr, "Section %-16s: ", sec_name);
 
     Elf_Data *data = 0;
     // If we find a code/data section, load it into the model
@@ -166,20 +170,20 @@ static void c_mem_load_elf(const char *elf_filename, const char *start_symbol,
         max_addr = shdr.sh_addr + data->d_size - 1;     // shdr.sh_size + 4;
 
       if (max_addr >= MAX_MEM_SIZE) {
-        fprintf(stdout,
+        fprintf(stderr,
                 "INTERNAL ERROR: max_addr (0x%0" PRIx64
                 ") > buffer size (0x%0" PRIx64 ")\n",
                 max_addr, MAX_MEM_SIZE);
-        fprintf(stdout, "    Please increase the #define in this program, "
+        fprintf(stderr, "    Please increase the #define in this program, "
                         "recompile, and run again\n");
-        fprintf(stdout, "    Abandoning this run\n");
+        fprintf(stderr, "    Abandoning this run\n");
         exit(1);
       }
 
       if (shdr.sh_type != SHT_NOBITS) {
         memcpy(&(mem_buf[shdr.sh_addr]), data->d_buf, data->d_size);
       }
-      fprintf(stdout,
+      fprintf(stderr,
               "addr %16" PRIx64 " to addr %16" PRIx64
               "; size 0x%8lx (= %0ld) bytes\n",
               shdr.sh_addr, shdr.sh_addr + data->d_size, data->d_size,
@@ -189,7 +193,7 @@ static void c_mem_load_elf(const char *elf_filename, const char *start_symbol,
 
     // If we find the symbol table, search for symbols of interest
     else if (shdr.sh_type == SHT_SYMTAB) {
-      fprintf(stdout,
+      fprintf(stderr,
               "Searching for addresses of '%s', '%s' and '%s' symbols\n",
               start_symbol, exit_symbol, tohost_symbol);
 
@@ -223,14 +227,14 @@ static void c_mem_load_elf(const char *elf_filename, const char *start_symbol,
         }
       }
     } else {
-      fprintf(stdout, "Ignored\n");
+      fprintf(stderr, "Ignored\n");
     }
   }
 
   elf_end(e);
 
-  fprintf(stdout, "Min addr:            %16" PRIx64 " (hex)\n", min_addr);
-  fprintf(stdout, "Max addr:            %16" PRIx64 " (hex)\n", max_addr);
+  fprintf(stderr, "Min addr:            %16" PRIx64 " (hex)\n", min_addr);
+  fprintf(stderr, "Max addr:            %16" PRIx64 " (hex)\n", max_addr);
 }
 
 // ================================================================
@@ -248,55 +252,67 @@ static void c_mem_load_elf(const char *elf_filename, const char *start_symbol,
 
 // ================================================================
 
+extern "C" {
+
 // Write out from word containing addr1 to word containing addr2
-static void write_mem_hex_file(ConnectalProcRequestProxy *proc, sem_t *sem,
-                               uint64_t addr1, uint64_t addr2) {
-  const uint64_t bits_per_raw_mem_word = 32;
-  uint64_t bytes_per_raw_mem_word = bits_per_raw_mem_word / 8; // 32
+uint64_t vx_upload_kernel() {
+  static uint64_t addr1 = BASE_ADDR_B;
+  static const uint64_t bits_per_raw_mem_word = 32;
+  static uint64_t offset = -4;
+
+  uint64_t addr2 = max_addr;
+  uint64_t bytes_per_raw_mem_word = bits_per_raw_mem_word / 8;
   uint64_t raw_mem_word_align_mask =
       (~((uint64_t)(bytes_per_raw_mem_word - 1)));
-
-  fprintf(stdout, "Subtracting 0x%08" PRIx64 " base from addresses\n",
-          BASE_ADDR_B);
 
   // Align the start and end addrs to raw mem words
   uint64_t a1 = (addr1 & raw_mem_word_align_mask);
   uint64_t a2 =
       ((addr2 + bytes_per_raw_mem_word - 1) & raw_mem_word_align_mask);
 
-  uint64_t addr;
-  uint32_t data;
-  for (addr = a1; addr < a2; addr += bytes_per_raw_mem_word) {
-    data = 0;
-    for (int j = (bytes_per_raw_mem_word - 1); j >= 0; j--)
-      data = data << 8 | mem_buf[addr + j];
-    proc->hostToCpu((uint32_t)(addr - BASE_ADDR_B), data, 0, 0);
-    sem_wait(sem);
+  offset += 4;
+  uint64_t addr = a1 + offset;
+  uint64_t data = 0;
+  if (a2 <= addr) {
+    if (mem_buf != NULL)
+      free(mem_buf);
+    mem_buf = NULL;
+    return (uint64_t)1 << 32;
+  } else {
+    for (int i = (bytes_per_raw_mem_word - 1); i >= 0; i--)
+      data = data << 8 | mem_buf[addr + i];
+    return ((offset << 32) | data);
   }
 }
 
 // ================================================================
 
-void load_elf(ConnectalProcRequestProxy *proc, sem_t *sem, const char *name) {
+uint32_t vx_upload_kernel_init(const char *input) {
+  char pathbuf[PATH_MAX];
+
+  const char *mem = realpath(input, pathbuf);
+
   mem_buf = (uint8_t *)malloc(sizeof(uint8_t) * MAX_MEM_SIZE);
   if (mem_buf == NULL) {
     fprintf(stderr, "Could not allocate mem_buf of size %lu bytes\n",
             MAX_MEM_SIZE);
-    exit(1);
+    return 1;
   }
 
   // Zero out the memory buffer before loading the ELF file
   bzero(mem_buf, MAX_MEM_SIZE);
 
-  c_mem_load_elf(name, "_start", "exit", "tohost");
+  c_mem_load_elf(mem, "_start", "exit", "tohost");
 
   if ((min_addr < BASE_ADDR_B) || (MAX_MEM_ADDR_256MB <= max_addr)) {
     fprintf(stderr,
             "Could not allocate mem_buf of min_addr %lu, max_addr %lu\n",
             min_addr, max_addr);
-    exit(1);
+    return 1;
   }
 
-  fprintf(stdout, "Loading elf to processor\n");
-  write_mem_hex_file(proc, sem, BASE_ADDR_B, max_addr);
+  fprintf(stderr, "Loading elf to processor\n");
+  return 0;
+}
+
 }

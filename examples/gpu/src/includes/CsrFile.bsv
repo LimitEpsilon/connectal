@@ -17,11 +17,11 @@ import FIFOF::*;
 import Vector::*;
 
 typedef struct {
-  CsrIndx csr;
+  CSR csr;
   Bool write;
-  Vector#(n, Data) datas;
+  Data data;
   Bit#(LogWarpNum) wid;
-  Bit#(ThreadNum) mask;
+  Bit#(n) mask;
 } CsrReq#(numeric type n) deriving(Bits, Eq, FShow);
 
 typedef struct {
@@ -31,59 +31,61 @@ typedef struct {
 // shared by all threads that are controlled by a single warp
 // especially, the mscratch register is used to place the address to the kernel argument structure
 interface CsrFile#(numeric type n);
-  method Action start;
+  method Action start(Data kernel_arg);
+  method ActionValue#(Tuple2#(Data, Data)) stop;
+  method Action newInst(UInt#(TLog#(TAdd#(1, ThreadNum))) count);
   method Bool started;
   method Action putCsrReq(CsrReq#(n) req);
   method ActionValue#(CsrResp#(n)) getCsrResp;
-  method ActionValue#(CpuToHostData) cpuToHost;
 endinterface
 
 (* synthesize *)
 module mkCsrFile(CsrFile#(ThreadNum));
   Reg#(Bool) startReg <- mkConfigReg(False);
-  Reg#(CsrIndx) pendingAddr <- mkRegU;
+  Reg#(CSR) pendingAddr <- mkRegU;
   Reg#(Maybe#(Data)) pending <- mkReg(tagged Invalid);
   FIFOF#(Vector#(ThreadNum, Data)) resps <- mkLFIFOF;
 
-	// CSR
-  Reg#(Data) numInsts <- mkConfigReg(0); // csrInstret -- read only
+  // CSR
+  Reg#(Data) numInsts <- mkReg(0); // csrInstret -- read only
   Reg#(Data) cycles <- mkReg(0); // csrCycle -- read only
-  FIFOF#(CpuToHostData) toHostFifo <- mkFIFOF; // csrMtohost -- write only
   Reg#(Data) scratch <- mkReg(0); // csrScratch -- read/write
   Bit#(TLog#(TAdd#(WarpNum, 1))) nw = fromInteger(valueOf(WarpNum));
   Bit#(TLog#(TAdd#(ThreadNum, 1))) nt = fromInteger(valueOf(ThreadNum));
 
   Bool isPending = isValid(pending);
 
+  (* fire_when_enabled *)
   rule count (startReg);
+    if (printDebug)
+      $display("\nCycle %d ----------------------------------------------------", cycles);
     cycles <= cycles + 1;
-    $display("\nCycle %d ----------------------------------------------------", cycles);
-//    if (cycles > 4000) $finish;
+    // if (cycles > 10000) $finish;
   endrule
 
   // MMIO, sequentialized as RMW
   rule wr (isPending);
     let data = fromMaybe(?, pending);
     case (pendingAddr)
-      csrMtohost: begin
-        // high 16 bits encodes type, low 16 bits are data
-        Bit#(16) hi = truncateLSB(data);
-        Bit#(16) lo = truncate(data);
-        toHostFifo.enq(
-          CpuToHostData {
-            c2hType: unpack(truncate(hi)),
-            data: lo
-          }
-        );
-      end
-      csrScratch: scratch <= data;
+      CSRmscratch: scratch <= data;
     endcase
     pending <= tagged Invalid;
   endrule
 
-  method Action start if(!startReg);
+  method Action start(Data kernel_arg) if (!startReg);
     startReg <= True;
     cycles <= 0;
+    numInsts <= 0;
+    scratch <= kernel_arg;
+  endmethod
+
+  method ActionValue#(Tuple2#(Data, Data)) stop if (startReg);
+    startReg <= False;
+    return tuple2(cycles, numInsts);
+  endmethod
+
+  method Action newInst(UInt#(TLog#(TAdd#(1, ThreadNum))) count) if (startReg);
+    numInsts <= numInsts + pack(extend(count));
   endmethod
 
   method Bool started;
@@ -91,36 +93,33 @@ module mkCsrFile(CsrFile#(ThreadNum));
   endmethod
 
   method Action putCsrReq(CsrReq#(ThreadNum) req) if (startReg && !isPending);
-    match CsrReq {write: .wr, csr: .csr, datas: .datas, wid: .wid, mask: .mask} = req;
+    match CsrReq {write: .wr, csr: .csr, data: .data, wid: .wid, mask: .mask} = req;
     pendingAddr <= csr;
     if (wr) begin
-      let idx = findIndex(id, unpack(mask));
-      if (idx matches tagged Valid .i)
-        pending <= tagged Valid datas[i];
-      if (csr != csrMtohost) resps.enq(unpack(0));
+      pending <= tagged Valid data;
+      resps.enq(unpack(0));
     end else begin
       Vector#(ThreadNum, Data) rd;
       for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1) begin
         Bit#(TLog#(ThreadNum)) tid = fromInteger(i);
         rd[i] =
           case(csr)
-            csrCycle: cycles;
-            csrInstret: numInsts;
-            csrMhartid: zeroExtend({wid, tid});
-            csrScratch: scratch;
-            csrNc: 1;
-            csrNw: zeroExtend(nw);
-            csrNt: zeroExtend(nt);
-            csrCid: 0;
-            csrWid: zeroExtend(wid);
-            csrTid: zeroExtend(tid);
-            csrTmask: zeroExtend(mask);
+            CSRmcycle: cycles;
+            CSRminstret: numInsts;
+            CSRmhartid: zeroExtend({wid, tid});
+            CSRmscratch: scratch;
+            CSRnc: 1;
+            CSRnw: zeroExtend(nw);
+            CSRnt: zeroExtend(nt);
+            CSRcid: 0;
+            CSRwid: zeroExtend(wid);
+            CSRtid: zeroExtend(tid);
+            CSRtmask: zeroExtend(mask);
             default: ?;
           endcase;
       end
       resps.enq(rd);
     end
-    numInsts <= numInsts + 1;
   endmethod
 
   method ActionValue#(CsrResp#(ThreadNum)) getCsrResp if (startReg);
@@ -128,10 +127,5 @@ module mkCsrFile(CsrFile#(ThreadNum));
 
     resps.deq;
     return CsrResp {datas: datas};
-  endmethod
-
-  method ActionValue#(CpuToHostData) cpuToHost;
-    toHostFifo.deq;
-    return toHostFifo.first;
   endmethod
 endmodule

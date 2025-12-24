@@ -18,20 +18,74 @@ import Types::*;
 import ProcTypes::*;
 import Vector::*;
 
+function FpuFunc getFmaFunc(Opcode op) =
+  case (op[1:0])
+    2'b00: FMAdd;
+    2'b01: FMSub;
+    2'b10: FNMSub;
+    2'b11: FNMAdd;
+  endcase;
+
+function FpuFunc getFpuFunc(Bit#(7) funct7, Bit#(1) rs2, Bit#(3) funct3) =
+  case (funct7)
+    f7_FADD_S:  FAdd;
+    f7_FSUB_S:  FSub;
+    f7_FMUL_S:  FMul;
+    f7_FDIV_S:  FDiv;
+    f7_FSQRT_S: FSqrt;
+    f7_FSGNJ_S:
+      case (funct3[1:0])
+        2'b00: FSgnj;
+        2'b01: FSgnjn;
+        2'b10: FSgnjx;
+        default: ?;
+      endcase
+    f7_FMIN_S:
+      case (funct3[0])
+        1'b0: FMin;
+        1'b1: FMax;
+      endcase
+    f7_FCMP_S:
+      case (funct7[1:0])
+        2'b00: FLe;
+        2'b01: FLt;
+        2'b10: FEq;
+        default: ?;
+      endcase
+    f7_FCVT_W_S:
+      case (rs2)
+        1'b0: FCvt_WF;
+        1'b1: FCvt_WUF;
+      endcase
+    f7_FMV_X_S:
+      case (funct3[0])
+        1'b0: FMv_XF;
+        1'b1: FClass;
+      endcase
+    f7_FCVT_S_W:
+      case (rs2)
+        1'b0: FCvt_FW;
+        1'b1: FCvt_FWU;
+      endcase
+    f7_FMV_S_X: FMv_FX;
+    default:    ?;
+  endcase;
+
 (* noinline *)
 function DecodedInst decode(RawInst inst);
   Opcode opcode = inst[  6 :  2 ];
-  RIndx rd      = inst[ 11 :  7 ];
+  let rd        = inst[ 11 :  7 ];
   let funct3    = inst[ 14 : 12 ];
-  RIndx rs1     = inst[ 19 : 15 ];
-  RIndx rs2     = inst[ 24 : 20 ];
+  let rs1       = inst[ 19 : 15 ];
+  let rs2       = inst[ 24 : 20 ];
+  let rs3       = inst[ 31 : 27 ];
   // let succ      = inst[ 23 : 20 ];
   // let pred      = inst[ 27 : 24 ];
   // let fm        = inst[ 31 : 28 ];
   let funct7    = inst[ 31 : 25 ];
   let mulDiv    = funct7 == 1; // M-instructions
   Bool isOp     = unpack(inst[5]); // distinguish between opOp and opImm
-  let czSel     = isOp && funct7 == 7; // OpOp and funct7 is 7 -> Zicond extension
+  let czSel     = isOp && funct7[2:0] == 7; // OpOp and funct7 is 7 -> Zicond extension
   Bool aluSel   = unpack(inst[30]); // select between Add/Sub, Srl/Sra
 
   Data immI = signExtend({ inst[31:20] });
@@ -47,20 +101,9 @@ function DecodedInst decode(RawInst inst);
     opAuipc: Auipc; // rd <- pc + immU;  pc <- pc + 4
     opJal: J; // rd <- pc + 4; pc <- pc + immJ
     opJalr: Jr; // rd <- pc + 4; pc <- rs1 + immI
-    opBranch: case (funct3) // pc <- compare rs1 rs2 ? pc + immI : pc + 4
-      fnBEQ, fnBNE, fnBLT, fnBLTU, fnBGE, fnBGEU: Br;
-      default: Unsupported;
-    endcase
-    opLoad: case (funct3) // rd <- M[rs1 + immI]; pc <- pc + 4
-      fnLW: Ld;
-      fnLB, fnLH, fnLBU, fnLHU: LdMask;
-      default: Unsupported;
-    endcase
-    opStore: case (funct3) // M[rs1 + immI] <- rs2; pc <- pc + 4
-      fnSW: St;
-      fnSB, fnSH: StMask;
-      default: Unsupported;
-    endcase
+    opBranch: Br; // pc <- compare rs1 rs2 ? pc + immI : pc + 4
+    opLoad, opLoadFp: Ld; // rd <- M[rs1 + immI]; pc <- pc + 4
+    opStore, opStoreFp: St; // M[rs1 + immI] <- rs2; pc <- pc + 4
     // LR SC not implemented
     opMiscMem: case (funct3)
       fnFENCE: Fence;
@@ -69,16 +112,14 @@ function DecodedInst decode(RawInst inst);
     opSystem: case (funct3) // CSRRC(I) CSRRWI CSRRSI SCALL not implemented
       fnCSRRW: // csr <- rs1; pc <- pc + 4
         // only support rd = 0 (no read of csr)
-        rd == 0 ? Csrw : Unsupported;
+        rd == 0 ? Csr : Unsupported;
       fnCSRRS: // rd <- csr; pc <- pc + 4
         // only support rs1 = 0 (no write to csr)
-        rs1 == 0 ? Csrr : Unsupported;
+        rs1 == 0 ? Csr : Unsupported;
       default: Unsupported;
     endcase
-    opSched: case (funct3)
-      fnTMC, fnWSPAWN, fnSPLIT, fnJOIN, fnBAR, fnPRED: Sched;
-      default: Unsupported;
-    endcase
+    opSched: Sched;
+    opFMAdd, opFMSub, opFNMSub, opFNMAdd, opFp: Fpu;
     default: Unsupported;
   endcase;
 
@@ -90,13 +131,15 @@ function DecodedInst decode(RawInst inst);
       fnADD:  isOp && aluSel ? Sub : Add;
       fnSLT:  Slt;
       fnSLTU: Sltu;
-      fnAND:  czSel ? Ceqz : And;
+      fnAND:  czSel ? Cnez : And;
       fnOR:   Or;
       fnXOR:  Xor;
       fnSLL:  Sll;
-      fnSR:   aluSel ? Sra : (czSel ? Cnez : Srl);
+      fnSR:   aluSel ? Sra : (czSel ? Ceqz : Srl);
     endcase :
     Add;
+
+  CsrFunc csrFunc = funct3 == fnCSRRW ? Csrw : Csrr;
 
   MFunc mFunc = unpack(funct3);
 
@@ -110,35 +153,54 @@ function DecodedInst decode(RawInst inst);
     default: NT;
   endcase;
 
+  let fpuFunc = opcode[2] == opFMAdd[2] ? getFmaFunc(opcode) : getFpuFunc(funct7, rs2[0], funct3);
+
   // split/join are the only instructions with funct3 = x1x among the scheduling instructions
-  let conv = { opcode[1:0], funct3[1] } == { opSched[1:0], fnSPLIT[1] };
+  let conv = { opcode, funct3[1] } == { opSched, fnSPLIT[1] };
 
-  // opOp or opSystem, used to select the second argument to give to the *alu*
+  // used to select the second argument to give to the *alu*
+  // opSched doesn't go through the alu, so it's okay
   let immValid = opcode[3:0] != opOp[3:0];
-  let imm = case (opcode)
-    opLui, opAuipc: immU;
-    opJal: immJ;
-    opBranch: immB;
-    opStore: immS;
-    default: immI;
-  endcase;
+  let imm =
+    case (opcode)
+      opLui, opAuipc: immU;
+      opJal: immJ;
+      opBranch: immB;
+      opStore, opStoreFp: immS;
+      default: immI;
+    endcase;
 
-  // among instructions that go to the scoreboard, should the rd field be considered?
-  // also, instructions such that immValid == True but uses rs2
-  let dstValid = opcode != opBranch && opcode != opStore && opcode != opSched;
+  let dstValid = opcode != opBranch && opcode != opStore && opcode != opStoreFp && opcode != opSched;
+  let dstFp = opcode == opLoadFp ||
+    (opcode[4:3] == opFp[4:3] &&
+      (opcode[2] == opFMAdd[2]
+      || {funct7[6], funct7[3]} != {f7_FCMP_S[6], f7_FCMP_S[3]}));
+  let src1Valid = opcode != opLui && opcode != opAuipc && opcode != opJal; // immU or immJ
+  let src1Fp =
+    opcode[4:3] == opFp[4:3] &&
+      (opcode[2] == opFMAdd[2]
+      || {funct7[6:5], funct7[3]} != {f7_FCVT_S_W[6:5], f7_FCVT_S_W[3]});
+  let src2Valid = opcode == opOp || !dstValid;
+  let src2Fp = opcode == opStoreFp ||
+    (opcode[4:3] == opFp[4:3] &&
+      (opcode[2] == opFMAdd[2]
+      || funct7[5] == f7_FADD_S[5]));
+  let src3Fp = opcode[4:2] == opFMAdd[4:2]; // 3'b100
 
   let dInst = DecodedInst {
     iType: iType,
     aluFunc: aluFunc,
     mFunc: mFunc,
     brFunc: brFunc, // only used by branch instructions
+    csrFunc: csrFunc,
+    fpuFunc: fpuFunc,
     conv: conv,
     predN: rd != 0 && rs2 != 0, // if pred, rs2 != 0. if split, rd != 0
-    dstValid: dstValid,
-    dst: rd,
-    src1: opcode == opLui ? 0 : rs1, // LUI is the only instruction using immU that goes to the RF
-    src2: rs2,
-    csr: truncate(immI),
+    dst: RIndx {isFpr: dstFp, idx: dstValid ? rd : 0},
+    src1: RIndx {isFpr: src1Fp, idx: src1Valid ? rs1 : 0},
+    src2: RIndx {isFpr: src2Fp, idx: src2Valid || src2Fp ? rs2 : 0},
+    src3: RIndx {isFpr: src3Fp, idx: src3Fp ? rs3 : 0},
+    csr: unpack(truncate(immI)),
     immValid: immValid,
     imm: imm
   };

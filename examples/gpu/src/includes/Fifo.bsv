@@ -2,7 +2,6 @@ import Vector::*;
 import FIFOF::*;
 import GetPut::*;
 import BRAMCore::*;
-import ConfigReg::*;
 
 //////////////////
 // Fifo interface
@@ -30,8 +29,8 @@ module mkPipelineFifo#(Bool guardEnq, Bool guardDeq) (Fifo#(n, t)) provisos (Bit
   RWire#(void)            clearReq  <- mkRWire;
   Reg#(Bit#(TLog#(n)))    enqP      <- mkReg(0);
   Reg#(Bit#(TLog#(n)))    deqP      <- mkReg(0);
-  Reg#(Bool)              empty     <- mkReg(True);
-  Reg#(Bool)              full      <- mkReg(False);
+  Reg#(Bool)              nEmpty    <- mkReg(False);
+  Reg#(Bool)              nFull     <- mkReg(True);
   Bit#(TLog#(n))          max_index = fromInteger(valueOf(n)-1);
 
   let nextEnqP = (enqP == max_index) ? 0 : enqP + 1;
@@ -42,37 +41,37 @@ module mkPipelineFifo#(Bool guardEnq, Bool guardDeq) (Fifo#(n, t)) provisos (Bit
     if (isValid(clearReq.wget)) begin
       enqP <= 0;
       deqP <= 0;
-      empty <= True;
-      full <= False;
+      nEmpty <= False;
+      nFull <= True;
     end else if (isValid(enqReq.wget)) begin
       enqP <= nextEnqP;
       if (isValid(deqReq.wget))
         deqP <= nextDeqP;
       else begin
-        empty <= False;
-        full <= nextEnqP == deqP;
+        nEmpty <= True;
+        nFull <= nextEnqP != deqP;
       end
     end else if (isValid(deqReq.wget)) begin
       deqP <= nextDeqP;
-      empty <= nextDeqP == enqP;
-      full <= False;
+      nEmpty <= nextDeqP != enqP;
+      nFull <= True;
     end
   endrule
 
-  method Bool notFull = isValid(deqReq.wget) || !full;
+  method Bool notFull = isValid(deqReq.wget) || nFull;
 
-  method Action enq(t x) if (!guardEnq || isValid(deqReq.wget) || !full);
+  method Action enq(t x) if (!guardEnq || isValid(deqReq.wget) || nFull);
     data[enqP] <= x;
     enqReq.wset(?);
   endmethod
 
-  method Bool notEmpty = !empty;
+  method Bool notEmpty = nEmpty;
 
-  method Action deq if (!guardDeq || !empty);
+  method Action deq if (!guardDeq || nEmpty);
     deqReq.wset(?);
   endmethod
 
-  method t first if (!guardDeq || !empty);
+  method t first if (!guardDeq || nEmpty);
     return data[deqP];
   endmethod
 
@@ -95,8 +94,8 @@ module mkBypassFifo#(Bool guardEnq, Bool guardDeq) (Fifo#(n, t)) provisos (Bits#
   RWire#(void)            clearReq  <- mkRWire;
   Reg#(Bit#(TLog#(n)))    enqP      <- mkReg(0);
   Reg#(Bit#(TLog#(n)))    deqP      <- mkReg(0);
-  Reg#(Bool)              empty     <- mkReg(True);
-  Reg#(Bool)              full      <- mkReg(False);
+  Reg#(Bool)              nEmpty    <- mkReg(False);
+  Reg#(Bool)              nFull     <- mkReg(True);
   Bit#(TLog#(n))          max_index = fromInteger(valueOf(n)-1);
 
   let nextEnqP = (enqP == max_index) ? 0 : enqP + 1;
@@ -107,38 +106,38 @@ module mkBypassFifo#(Bool guardEnq, Bool guardDeq) (Fifo#(n, t)) provisos (Bits#
     if (isValid(clearReq.wget)) begin
       enqP <= 0;
       deqP <= 0;
-      empty <= True;
-      full <= False;
+      nEmpty <= False;
+      nFull <= True;
     end else if (enqReq.wget matches tagged Valid .x) begin
       enqP <= nextEnqP;
       data[enqP] <= x;
       if (isValid(deqReq.wget))
         deqP <= nextDeqP;
       else begin
-        empty <= False;
-        full <= nextEnqP == deqP;
+        nEmpty <= True;
+        nFull <= nextEnqP != deqP;
       end
     end else if (isValid(deqReq.wget)) begin
       deqP <= nextDeqP;
-      empty <= nextDeqP == enqP;
-      full <= False;
+      nEmpty <= nextDeqP != enqP;
+      nFull <= True;
     end
   endrule
 
-  method Bool notFull = !full;
+  method Bool notFull = nFull;
 
-  method Action enq(t x) if (!guardEnq || !full);
+  method Action enq(t x) if (!guardEnq || nFull);
     enqReq.wset(x);
   endmethod
 
-  method Bool notEmpty = isValid(enqReq.wget) || !empty;
+  method Bool notEmpty = isValid(enqReq.wget) || nEmpty;
 
-  method Action deq if (!guardDeq || isValid(enqReq.wget) || !empty);
+  method Action deq if (!guardDeq || isValid(enqReq.wget) || nEmpty);
     deqReq.wset(?);
   endmethod
 
-  method t first if (!guardDeq || isValid(enqReq.wget) || !empty);
-    return empty ? fromMaybe(?, enqReq.wget) : data[deqP];
+  method t first if (!guardDeq || isValid(enqReq.wget) || nEmpty);
+    return nEmpty ? data[deqP] : fromMaybe(?, enqReq.wget);
   endmethod
 
   method Action clear;
@@ -161,8 +160,8 @@ module mkCFFifo#(Bool guardEnq, Bool guardDeq) (Fifo#(n, t)) provisos (Bits#(t, 
   RWire#(void)            clearReq  <- mkRWire;
   Reg#(Bit#(TLog#(n)))    enqP      <- mkReg(0);
   Reg#(Bit#(TLog#(n)))    deqP      <- mkReg(0);
-  Reg#(Bool)              empty     <- mkReg(True);
-  Reg#(Bool)              full      <- mkReg(False);
+  Reg#(Bool)              nEmpty    <- mkReg(False);
+  Reg#(Bool)              nFull     <- mkReg(True);
   Bit#(TLog#(n))          max_index = fromInteger(valueOf(n)-1);
 
   let nextEnqP = (enqP == max_index) ? 0 : enqP + 1;
@@ -173,37 +172,37 @@ module mkCFFifo#(Bool guardEnq, Bool guardDeq) (Fifo#(n, t)) provisos (Bits#(t, 
     if (isValid(clearReq.wget)) begin
       enqP <= 0;
       deqP <= 0;
-      empty <= True;
-      full <= False;
+      nEmpty <= False;
+      nFull <= True;
     end else if (enqReq.wget matches tagged Valid .x) begin
       data[enqP] <= x;
       enqP <= nextEnqP;
       if (isValid(deqReq.wget))
         deqP <= nextDeqP;
       else begin
-        empty <= False;
-        full <= nextEnqP == deqP;
+        nEmpty <= True;
+        nFull <= nextEnqP != deqP;
       end
     end else if (isValid(deqReq.wget)) begin
       deqP <= nextDeqP;
-      empty <= nextDeqP == enqP;
-      full <= False;
+      nEmpty <= nextDeqP != enqP;
+      nFull <= True;
     end
   endrule
 
-  method Bool notFull = !full;
+  method Bool notFull = nFull;
 
-  method Action enq(t x) if (!guardEnq || !full);
+  method Action enq(t x) if (!guardEnq || nFull);
     enqReq.wset(x);
   endmethod
 
-  method Bool notEmpty = !empty;
+  method Bool notEmpty = nEmpty;
 
-  method Action deq if (!guardDeq || !empty);
+  method Action deq if (!guardDeq || nEmpty);
     deqReq.wset(?);
   endmethod
 
-  method t first if (!guardDeq || !empty);
+  method t first if (!guardDeq || nEmpty);
     return data[deqP];
   endmethod
 
@@ -213,24 +212,25 @@ module mkCFFifo#(Bool guardEnq, Bool guardDeq) (Fifo#(n, t)) provisos (Bits#(t, 
 endmodule
 
 // from src/Libraries/Base3-Misc/BRAMFIFO.bsv
+// Doesn't work with the "gate_all_clocks" attribute
 module mkBRAMFifo#(Bool guardEnq, Bool guardDeq) (Fifo#(n, t))
   provisos (Bits#(t, tSz), Log#(n, l), Add#(1, l, d));
 
   Integer memSize = 2 ** valueOf(l);
   BRAM_DUAL_PORT#(Bit#(l), t)          memory    <- mkBRAMCore2(memSize, False);
 
-  Reg#(Bit#(d))                        rWrPtr    <- mkConfigReg(0);
+  Reg#(Bit#(d))                        rWrPtr    <- mkReg(0);
   PulseWire                            pwDequeue <- mkPulseWire;
   PulseWire                            pwEnqueue <- mkPulseWire;
   PulseWire                            pwClear   <- mkPulseWire;
   Wire#(t)                             wDataIn   <- mkDWire(?);
-  Reg#(Bit#(d))                        rRdPtr    <- mkConfigReg(0);
+  Reg#(Bit#(d))                        rRdPtr    <- mkReg(0);
   Wire#(t)                             wDataOut  <- mkDWire(?);
 
   Reg#(Maybe#(Tuple2#(Bit#(d), t)))    rCache    <- mkReg(tagged Invalid);
 
-  Bool empty = rRdPtr == rWrPtr;
-  Bool full  = rRdPtr + fromInteger(valueOf(n)) == rWrPtr;
+  Bool nEmpty = rRdPtr != rWrPtr;
+  Bool nFull  = rRdPtr + fromInteger(valueOf(n)) != rWrPtr;
 
   (* fire_when_enabled, no_implicit_conditions, aggressive_implicit_conditions *)
   rule portA;
@@ -267,21 +267,21 @@ module mkBRAMFifo#(Bool guardEnq, Bool guardDeq) (Fifo#(n, t))
       wDataOut <= memory.b.read;
   endrule
 
-  method Action enq(t sendData) if (!guardEnq || !full);
+  method Action enq(t sendData) if (!guardEnq || nFull);
     pwEnqueue.send;
     wDataIn <= sendData;
   endmethod
 
-  method Action deq if (!guardDeq || !empty);
+  method Action deq if (!guardDeq || nEmpty);
     pwDequeue.send;
   endmethod
 
-  method t first if (!guardDeq || !empty);
+  method t first if (!guardDeq || nEmpty);
     return wDataOut;
   endmethod
 
-  method Bool notFull  = !full;
-  method Bool notEmpty = !empty;
+  method Bool notFull  = nFull;
+  method Bool notEmpty = nEmpty;
 
   method Action clear;
     pwClear.send();

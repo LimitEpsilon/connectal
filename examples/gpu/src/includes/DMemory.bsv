@@ -11,8 +11,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 */
 
 import Vector::*;
-import FIFOF::*;
-import SpecialFIFOs::*;
+import Fifo::*;
 import GetPut::*;
 import ClientServer::*;
 import Memory::*;
@@ -44,7 +43,7 @@ endfunction
 module mkDMemoryServer(MemoryServer#(MemHeight, PhysDataSz));
   // In simulation we always init memory from a fixed VMH file (for speed)
   RegFile#(Bit#(MemHeight), Bit#(PhysDataSz)) mem <- mkRegFileFull;
-  FIFOF#(Bit#(PhysDataSz)) responses <- mkLFIFOF;
+  Fifo#(120, Bit#(PhysDataSz)) responses <- mkLatencyFifo(True, True); // simulate latency from DRAM
 
   interface Put request;
     method Action put(MemoryRequest#(MemHeight, PhysDataSz) req);
@@ -68,7 +67,7 @@ endmodule
 (* synthesize *)
 module mkDMemory(DMemory);
   MemoryServer#(MemHeight, PhysDataSz) mem <- mkDMemoryServer;
-	MemInitIfc memInit <- mkMemInitDRAM(mem);
+  MemInitIfc memInit <- mkMemInitDRAM(mem);
 
   interface dMemServer = mem;
   interface init = memInit;
@@ -85,8 +84,8 @@ endinterface
 
 (* synthesize *)
 module mkDMemoryRouter(DMemoryRouter#(ThreadNum));
-  FIFOF#(MemoryRequest#(MemHeight, PhysDataSz)) reqs <- mkBypassFIFOF;
-  FIFOF#(MemoryResponse#(PhysDataSz)) resps <- mkBypassFIFOF;
+  Fifo#(1, MemoryRequest#(MemHeight, PhysDataSz)) reqs <- mkBypassFifo(True, True);
+  Fifo#(1, MemoryResponse#(PhysDataSz)) resps <- mkBypassFifo(True, True);
 
   let m =
     interface MemoryServer;

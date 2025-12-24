@@ -1,17 +1,24 @@
-/*
+// Copyright (c) 2016 Massachusetts Institute of Technology
 
-Copyright (C) 2012
+// Permission is hereby granted, free of charge, to any person
+// obtaining a copy of this software and associated documentation
+// files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy,
+// modify, merge, publish, distribute, sublicense, and/or sell copies
+// of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
 
-Arvind <arvind@csail.mit.edu>
-Muralidaran Vijayaraghavan <vmurali@csail.mit.edu>
+// The above copyright notice and this permission notice shall be
+// included in all copies or substantial portions of the Software.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-*/
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+// BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+// ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
 
 import Vector::*;
 import ClientServer::*;
@@ -22,26 +29,151 @@ import CMemTypes::*;
 
 // cpu to host data type
 typedef enum {
-	ExitCode = 2'd0,
-	PrintChar = 2'd1,
-	PrintIntLow = 2'd2,
-	PrintIntHigh = 2'd3
+  SignalDone   = 2'd0,
+  ExitCode     = 2'd1,
+  PrintChar    = 2'd2,
+  TellState    = 2'd3
 } CpuToHostType deriving(Bits, Eq, FShow);
 
 typedef struct {
-	CpuToHostType c2hType;
-	Bit#(16) data;
+  CpuToHostType c2hType;
+  Bit#(16) data;
 } CpuToHostData deriving(Bits, Eq, FShow);
 
 interface Proc;
   method ActionValue#(CpuToHostData) cpuToHost;
-  method Action hostToCpu(Addr pc);
+  method Action hostToCpu(Addr pc, Data kernel_arg);
   interface MemoryClient#(AddrSz, DataSz) iMemClient;
   interface MemoryClient#(MemHeight, PhysDataSz) dMemClient;
 endinterface
 
-// general purpose reg index
-typedef Bit#(5) RIndx;
+// Register index (merged GPR + FPR)
+typedef struct {
+  Bool    isFpr;
+  Bit#(5) idx;
+} RIndx deriving (Bits, Eq, FShow);
+
+// This encoding matches inst[31,30,29,27] since inst[28] is always 0
+typedef enum {
+  Swap    = 4'b0001,
+  Add     = 4'b0000,
+  Xor     = 4'b0010,
+  And     = 4'b0110,
+  Or      = 4'b0100,
+  Min     = 4'b1000,
+  Max     = 4'b1010,
+  Minu    = 4'b1100,
+  Maxu    = 4'b1110
+} RVAmoOp deriving (Bits, Eq, FShow);
+
+typedef enum {
+  CSRustatus          = 12'h000,
+  CSRuie              = 12'h004,
+  CSRutvec            = 12'h005,
+  CSRuscratch         = 12'h040,
+  CSRuepc             = 12'h041,
+  CSRucause           = 12'h042,
+  CSRubadaddr         = 12'h043,
+  CSRuip              = 12'h044,
+  CSRfflags           = 12'h001,
+  CSRfrm              = 12'h002,
+  CSRfcsr             = 12'h003,
+  CSRcycle            = 12'hc00,
+  CSRtime             = 12'hc01,
+  CSRinstret          = 12'hc02,
+  CSRcycleh           = 12'hc80,
+  CSRtimeh            = 12'hc81,
+  CSRinstreth         = 12'hc82,
+  CSRsstatus          = 12'h100,
+  CSRsedeleg          = 12'h102,
+  CSRsideleg          = 12'h103,
+  CSRsie              = 12'h104,
+  CSRstvec            = 12'h105,
+  CSRsscratch         = 12'h140,
+  CSRsepc             = 12'h141,
+  CSRscause           = 12'h142,
+  CSRsbadaddr         = 12'h143,
+  CSRsip              = 12'h144,
+  CSRsptbr            = 12'h180,
+  CSRscycle           = 12'hd00,
+  CSRstime            = 12'hd01,
+  CSRsinstret         = 12'hd02,
+  CSRscycleh          = 12'hd80,
+  CSRstimeh           = 12'hd81,
+  CSRsinstreth        = 12'hd82,
+  CSRhstatus          = 12'h200,
+  CSRhedeleg          = 12'h202,
+  CSRhideleg          = 12'h203,
+  CSRhie              = 12'h204,
+  CSRhtvec            = 12'h205,
+  CSRhscratch         = 12'h240,
+  CSRhepc             = 12'h241,
+  CSRhcause           = 12'h242,
+  CSRhbadaddr         = 12'h243,
+  CSRhcycle           = 12'he00,
+  CSRhtime            = 12'he01,
+  CSRhinstret         = 12'he02,
+  CSRhcycleh          = 12'he80,
+  CSRhtimeh           = 12'he81,
+  CSRhinstreth        = 12'he82,
+  CSRmisa             = 12'hf10,
+  CSRmvendorid        = 12'hf11,
+  CSRmarchid          = 12'hf12,
+  CSRmimpid           = 12'hf13,
+  CSRmhartid          = 12'hf14,
+  CSRmstatus          = 12'h300,
+  CSRmedeleg          = 12'h302,
+  CSRmideleg          = 12'h303,
+  CSRmie              = 12'h304,
+  CSRmtvec            = 12'h305,
+  CSRmscratch         = 12'h340,
+  CSRmepc             = 12'h341,
+  CSRmcause           = 12'h342,
+  CSRmbadaddr         = 12'h343,
+  CSRmip              = 12'h344,
+  CSRmbase            = 12'h380,
+  CSRmbound           = 12'h381,
+  CSRmibase           = 12'h382,
+  CSRmibound          = 12'h383,
+  CSRmdbase           = 12'h384,
+  CSRmdbound          = 12'h385,
+  CSRmcycle           = 12'hf00,
+  CSRmtime            = 12'hf01,
+  CSRminstret         = 12'hf02,
+  CSRmcycleh          = 12'hf80,
+  CSRmtimeh           = 12'hf81,
+  CSRminstreth        = 12'hf82,
+  CSRmucounteren      = 12'h310,
+  CSRmscounteren      = 12'h311,
+  CSRmhcounteren      = 12'h312,
+  CSRmucycle_delta    = 12'h700,
+  CSRmutime_delta     = 12'h701,
+  CSRmuinstret_delta  = 12'h702,
+  CSRmscycle_delta    = 12'h704,
+  CSRmstime_delta     = 12'h705,
+  CSRmsinstret_delta  = 12'h706,
+  CSRmhcycle_delta    = 12'h708,
+  CSRmhtime_delta     = 12'h709,
+  CSRmhinstret_delta  = 12'h70a,
+  CSRmucycle_deltah   = 12'h780,
+  CSRmutime_deltah    = 12'h781,
+  CSRmuinstret_deltah = 12'h782,
+  CSRmscycle_deltah   = 12'h784,
+  CSRmstime_deltah    = 12'h785,
+  CSRmsinstret_deltah = 12'h786,
+  CSRmhcycle_deltah   = 12'h788,
+  CSRmhtime_deltah    = 12'h789,
+  CSRmhinstret_deltah = 12'h78a,
+  // Vortex extensions
+  CSRnc               = 12'hfc2,
+  CSRnw               = 12'hfc1,
+  CSRnt               = 12'hfc0,
+  CSRtmask            = 12'hcc4,
+  CSRcid              = 12'hcc2,
+  CSRwid              = 12'hcc1,
+  CSRtid              = 12'hcc0,
+  CSRnone             = 12'hfff
+} CSR deriving (Bits, Eq, FShow);
 
 // opcode
 typedef Bit#(5) Opcode;
@@ -59,21 +191,100 @@ Opcode opJal     = 5'b11011;
 Opcode opSystem  = 5'b11100;
 Opcode opSched   = 5'b00010;
 
-// CSR index
-typedef 12 CsrSz;
-typedef Bit#(CsrSz) CsrIndx;
-CsrIndx csrInstret = 12'hc02;
-CsrIndx csrCycle   = 12'hc00;
-CsrIndx csrMhartid = 12'hf14;
-CsrIndx csrMtohost = 12'h780;
-CsrIndx csrScratch = 12'h340;
-CsrIndx csrNc      = 12'hfc2;
-CsrIndx csrNw      = 12'hfc1;
-CsrIndx csrNt      = 12'hfc0;
-CsrIndx csrCid     = 12'hcc2;
-CsrIndx csrWid     = 12'hcc1;
-CsrIndx csrTid     = 12'hcc0;
-CsrIndx csrTmask   = 12'hcc4;
+// from https://github.com/bluespec/Flute/blob/master/src_Core/ISA/ISA_Decls.bsv
+// ================================================================
+// Floating Point Instructions
+
+// ----------------------------------------------------------------
+// Floating point Load-Store
+
+Opcode opLoadFp  = 5'b00001;
+Opcode opStoreFp = 5'b01001;
+
+Bit#(3) f3_FSW = 3'b010;
+Bit#(3) f3_FLW = 3'b010;
+
+Bit#(3) f3_FSD = 3'b011;
+Bit#(3) f3_FLD = 3'b011;
+
+// ----------------------------------------------------------------
+// Fused FP Multiply Add/Sub instructions (FM/FNM)
+
+Opcode opFMAdd  = 5'b10000;
+Opcode opFMSub  = 5'b10001;
+Opcode opFNMSub = 5'b10010;
+Opcode opFNMAdd = 5'b10011;
+
+Bit#(2) f2_S = 2'b00;
+Bit#(2) f2_D = 2'b01;
+Bit#(2) f2_Q = 2'b11;
+
+// ----------------------------------------------------------------
+// All other FP intructions
+
+Opcode opFp = 5'b10100;
+
+// ----------------
+// RV32F
+
+Bit#(7) f7_FADD_S      = 7'b0000000;
+Bit#(7) f7_FSUB_S      = 7'b0000100;
+Bit#(7) f7_FMUL_S      = 7'b0001000;
+Bit#(7) f7_FDIV_S      = 7'b0001100;
+Bit#(7) f7_FSQRT_S     = 7'b0101100; Bit#(5) rs2_FSQRT_S   = 5'b00000;
+
+Bit#(7) f7_FSGNJ_S     = 7'b0010000;                                   Bit#(3) f3_FSGNJ_S  = 3'b000;
+Bit#(7) f7_FSGNJN_S    = 7'b0010000;                                   Bit#(3) f3_FSGNJN_S = 3'b001;
+Bit#(7) f7_FSGNJX_S    = 7'b0010000;                                   Bit#(3) f3_FSGNJX_S = 3'b010;
+
+Bit#(7) f7_FMIN_S      = 7'b0010100;                                   Bit#(3) f3_FMIN_S   = 3'b000;
+Bit#(7) f7_FMAX_S      = 7'b0010100;                                   Bit#(3) f3_FMAX_S   = 3'b001;
+
+Bit#(7) f7_FCVT_W_S    = 7'b1100000; Bit#(5) rs2_FCVT_W_S  = 5'b00000;
+Bit#(7) f7_FCVT_WU_S   = 7'b1100000; Bit#(5) rs2_FCVT_WU_S = 5'b00001;
+Bit#(7) f7_FMV_X_S     = 7'b1110000; Bit#(5) rs2_FMV_X_S   = 5'b00000; Bit#(3) f3_FMV_X_S  = 3'b000;
+
+Bit#(7) f7_FCMP_S      = 7'b1010000;
+Bit#(7) f7_FEQ_S       = 7'b1010000;                                   Bit#(3) f3_FEQ_S    = 3'b010;
+Bit#(7) f7_FLT_S       = 7'b1010000;                                   Bit#(3) f3_FLT_S    = 3'b001;
+Bit#(7) f7_FLE_S       = 7'b1010000;                                   Bit#(3) f3_FLE_S    = 3'b000;
+
+Bit#(7) f7_FCLASS_S    = 7'b1110000; Bit#(5) rs2_FCLASS_S  = 5'b00000; Bit#(3) f3_FCLASS_S = 3'b001;
+Bit#(7) f7_FCVT_S_W    = 7'b1101000; Bit#(5) rs2_FCVT_S_W  = 5'b00000;
+Bit#(7) f7_FCVT_S_WU   = 7'b1101000; Bit#(5) rs2_FCVT_S_WU = 5'b00001;
+Bit#(7) f7_FMV_S_X     = 7'b1111000; Bit#(5) rs2_FMV_S_X   = 5'b00000; Bit#(3) f3_FMV_S_X  = 3'b000;
+
+typedef enum {
+  FAdd, FSub, FMul, FDiv, FSqrt,
+  FSgnj, FSgnjn, FSgnjx,
+  FMin, FMax,
+  FCvt_FF,
+  FCvt_WF, FCvt_WUF, FCvt_LF, FCvt_LUF,
+  FCvt_FW, FCvt_FWU, FCvt_FL, FCvt_FLU,
+  FEq, FLt, FLe,
+  FClass, FMv_XF, FMv_FX,
+  FMAdd, FMSub, FNMSub, FNMAdd
+} FpuFunc deriving (Bits, Eq, FShow);
+
+typedef enum {
+  Single,
+  Double
+} FpuPrecision deriving (Bits, Eq, FShow);
+
+typedef struct {
+  FpuFunc         func;
+  FpuPrecision    precision;
+} FpuInst deriving (Bits, Eq, FShow);
+
+// Rounding Modes
+typedef enum {
+  RNE  = 3'b000,
+  RTZ  = 3'b001,
+  RDN  = 3'b010,
+  RUP  = 3'b011,
+  RMM  = 3'b100,
+  RDyn = 3'b111
+} RVRoundMode deriving (Bits, Eq, FShow);
 
 // For CSR, only following two are implemented 
 // CSRR rd csr (i.e. CSRRS rd csr x0)
@@ -82,48 +293,51 @@ CsrIndx csrTmask   = 12'hcc4;
 // SCALL, SBREAK not implemented
 
 typedef enum {
-	Unsupported,
-	Alu,
-	MulDiv,
-	Sched,
-	Ld,
-	LdMask,
-	St,
-	StMask,
-	J,
-	Jr,
-	Br,
-	Auipc,
-	Csrr,
-	Csrw,
-	Fence
+  Unsupported,
+  Alu,
+  MulDiv,
+  Sched,
+  Ld,
+  St,
+  J,
+  Jr,
+  Br,
+  Fpu,
+  Auipc,
+  Csr,
+  Fence
 } IType deriving(Bits, Eq, FShow);
 
 typedef enum {
-	Eq,
-	Neq,
-	AT,
-	NT,
-	Lt,
-	Ge,
-	Ltu,
-	Geu
+  Eq,
+  Neq,
+  AT,
+  NT,
+  Lt,
+  Ge,
+  Ltu,
+  Geu
 } BrFunc deriving(Bits, Eq, FShow);
 
 typedef enum {
-	Add,
-	Sub,
-	And,
-	Or,
-	Xor,
-	Slt,
-	Sltu,
-	Sll,
-	Sra,
-	Srl,
-	Ceqz,
-	Cnez
+  Add,
+  Sub,
+  And,
+  Or,
+  Xor,
+  Slt,
+  Sltu,
+  Sll,
+  Sra,
+  Srl,
+  Ceqz,
+  Cnez
 } AluFunc deriving(Bits, Eq, FShow);
+
+typedef enum {
+  Csrr,
+  Csrw
+} CsrFunc deriving(Bits, Eq, FShow);
 
 // has the same bit representation as funct3
 // in the case that the representation changes, only change the order between Mult and Divide
@@ -134,34 +348,26 @@ typedef union tagged {
 
 // has the same bit representation as {funct3[2], funct3[0]}
 typedef enum {
-  B, // byte, 2'b00
-  H, // half, 2'b01
-  BU, // byte unsigned, 2'b10
-  HU // half unsigned, 2'b11
+  B  = 2'b00, // byte
+  H  = 2'b01, // half
+  BU = 2'b10, // byte unsigned
+  HU = 2'b11  // half unsigned
 } MemMask deriving(Bits, Eq, FShow);
-
-typedef void Exception;
-
-typedef struct {
-  Addr pc;
-  Addr nextPc;
-  IType brType;
-  Bool taken;
-  Bool mispredict;
-} Redirect deriving (Bits, Eq, FShow);
 
 typedef struct {
   IType    iType;
   AluFunc  aluFunc;
+  FpuFunc  fpuFunc;
   MFunc    mFunc;
   BrFunc   brFunc;
+  CsrFunc  csrFunc;
   Bool     conv; // split or join
   Bool     predN;
-  Bool     dstValid;
   RIndx    dst;
   RIndx    src1;
   RIndx    src2;
-  CsrIndx  csr;
+  RIndx    src3;
+  CSR      csr;
   Bool     immValid;
   Data     imm;
 } DecodedInst deriving(Bits, Eq, FShow);
@@ -178,31 +384,34 @@ typedef struct {
   Addr     takenPc; // PC + imm for branch, jal
   IType    iType;
   AluFunc  aluFunc;
+  FpuFunc  fpuFunc;
   MFunc    mFunc;
   BrFunc   brFunc;
+  CsrFunc  csrFunc;
   Bool     predN; // rd != 0
   RIndx    dst;
-  CsrIndx  csr;
+  CSR      csr;
   Bool     immValid; // Mem, jalr
   Data     imm; // Mem, jalr
 } RFCont deriving(Bits, Eq, FShow);
 
 typedef struct {
   Warp     warp;
-  IType    iType; // Alu, MulDiv, Ld, LdMask, St, StMask, Jr
+  IType    iType; // Alu, Ld, St, Jr
+  Bool     isMask;
   MemMask  memMask;
   RIndx    dst;
 } EXCont deriving(Bits, Eq, FShow);
 
 typedef struct {
+  Warp     warp;
+  RIndx    dst;
+} SimpleEXCont deriving(Bits, Eq, FShow);
+
+typedef struct {
   Warp  warp;
   Addr  takenPc; // PC + imm (branch taken)
 } BRCont deriving(Bits, Eq, FShow);
-
-typedef struct {
-  Warp   warp;
-  RIndx  dst;
-} CSRCont deriving(Bits, Eq, FShow);
 
 typedef struct {
   Warp                    warp;
@@ -222,14 +431,14 @@ Bit#(3) fnSR      = 3'b101;
 Bit#(3) fnOR      = 3'b110;
 Bit#(3) fnAND     = 3'b111;
 // MUL, DIV
-Bit #(3) fnMUL    = 3'b000; // lower 32 bits
-Bit #(3) fnMULH   = 3'b001; // upper 32 bits, signed * signed
-Bit #(3) fnMULHSU = 3'b010; // upper 32 bits, signed * unsigned
-Bit #(3) fnMULHU  = 3'b011; // upper 32 bits, unsigned * unsigned
-Bit #(3) fnDIV    = 3'b100; // quotient, signed / signed
-Bit #(3) fnDIVU   = 3'b101; // quotient, unsigned / unsigned
-Bit #(3) fnREM    = 3'b110; // remainder, signed % signed
-Bit #(3) fnREMU   = 3'b111; // remainder, unsigned % unsigned
+Bit#(3) fnMUL    = 3'b000; // lower 32 bits
+Bit#(3) fnMULH   = 3'b001; // upper 32 bits, signed * signed
+Bit#(3) fnMULHSU = 3'b010; // upper 32 bits, signed * unsigned
+Bit#(3) fnMULHU  = 3'b011; // upper 32 bits, unsigned * unsigned
+Bit#(3) fnDIV    = 3'b100; // quotient, signed / signed
+Bit#(3) fnDIVU   = 3'b101; // quotient, unsigned / unsigned
+Bit#(3) fnREM    = 3'b110; // remainder, signed % signed
+Bit#(3) fnREMU   = 3'b111; // remainder, unsigned % unsigned
 // Branch
 Bit#(3) fnBEQ     = 3'b000;
 Bit#(3) fnBNE     = 3'b001;
@@ -269,198 +478,4 @@ Bit#(3) fnSPLIT   = 3'b010;
 Bit#(3) fnJOIN    = 3'b011;
 Bit#(3) fnBAR     = 3'b100;
 Bit#(3) fnPRED    = 3'b101;
-
-// pretty print instuction
-function Fmt showInst(RawInst inst);
-	Fmt ret = $format("");
-
-  Opcode opcode = inst[  6 :  2 ];
-  let rd        = inst[ 11 :  7 ];
-  let funct3    = inst[ 14 : 12 ];
-  let rs1       = inst[ 19 : 15 ];
-  let rs2       = inst[ 24 : 20 ];
-  let funct7    = inst[ 31 : 25 ];
-  let mulDiv    = funct7 == 1; // M-instructions
-  let czSel     = unpack(inst[5]) && funct7 == 7; // OpOp and funct7 is 7 -> Zicond extension
-  let aluSel    = inst[30]; // select between Add/Sub, Srl/Sra
-
-  Data immI = signExtend(inst[31:20]);
-  Data immS = signExtend({ inst[31:25], inst[11:7] });
-  Data immB = signExtend({ inst[31], inst[7], inst[30:25], inst[11:8], 1'b0 });
-  Data immU = { inst[31:12], 12'b0 };
-  Data immJ = signExtend({ inst[31], inst[19:12], inst[20], inst[30:21], 1'b0 });
-
-  case (opcode)
-    opOpImm: begin
-			ret = case (funct3)
-				fnADD: $format("addi");
-				fnSLT: $format("slti");
-				fnSLTU: $format("sltiu");
-				fnAND: $format("andi");
-				fnOR: $format("ori");
-				fnXOR: $format("xori");
-				fnSLL: $format("slli");
-				fnSR: (aluSel == 0 ? $format("srli") : $format("srai"));
-				default: $format("unsupport OpImm 0x%0x", inst);
-			endcase;
-			ret = ret + $format(" r%d = r%d ", rd, rs1);
-			ret = ret +
-			  case (funct3)
-			  	fnSLL, fnSR: $format("0x%0x", immI[4:0]); // only low 5 bits for shift
-			  	default: $format("0x%0x", immI);
-			  endcase;
-		end
-
-		opOp: begin
-			ret = case (funct3)
-				fnADD: (aluSel == 0 ? $format("add") : $format("sub"));
-				fnSLT: $format("slt");
-				fnSLTU: $format("sltu");
-				fnAND: (czSel ? $format("czero.eqz") : $format("and"));
-				fnOR: $format("or");
-				fnXOR: $format("xor");
-				fnSLL: $format("sll");
-				fnSR: (aluSel == 0 ? (czSel ? $format("srl") : $format("czero.nez")) : $format("sra"));
-			endcase;
-			if (mulDiv) begin
-			  ret = case (funct3)
-          fnMUL    : $format("mul");
-          fnMULH   : $format("mulh");
-          fnMULHSU : $format("mulhsu");
-          fnMULHU  : $format("mulhu");
-          fnDIV    : $format("div");
-          fnDIVU   : $format("divu");
-          fnREM    : $format("rem");
-          fnREMU   : $format("remu");
-			  endcase;
-			end
-			ret = ret + $format(" r%d = r%d r%d", rd, rs1, rs2);
-		end
-
-		opLui: begin
-			ret = $format("lui r%d 0x%0x", rd, immU);
-		end
-
-		opAuipc: begin
-			ret = $format("auipc r%d 0x%0x", rd, immU);
-		end
-
-		opJal: begin
-			ret = $format("jal r%d 0x%0x", rd, immJ);
-		end
-
-		opJalr: begin
-			ret = $format("jalr r%d [r%d 0x%0x]", rd, rs1, immI);
-		end
-
-		opBranch: begin
-			ret = case(funct3)
-				fnBEQ: $format("beq");
-				fnBNE: $format("bne");
-				fnBLT: $format("blt");
-				fnBLTU: $format("bltu");
-				fnBGE: $format("bge");
-				fnBGEU: $format("bgeu");
-				default: $format("unsupport Branch 0x%0x", inst);
-			endcase;
-			ret = ret + $format(" r%d r%d 0x%0x", rs1, rs2, immB);
-		end
-
-		opLoad: begin
-			ret = case(funct3)
-				fnLW: $format("lw");
-        fnLB: $format("lb");
-        fnLH: $format("lh");
-        fnLBU: $format("lbu");
-        fnLHU: $format("lhu");
-				default: $format("unsupport Load 0x%0x", inst);
-			endcase;
-			ret = ret + $format(" r%d = [r%d 0x%0x]", rd, rs1, immI);
-		end
-
-		opStore: begin
-			ret = case(funct3)
-				fnSW: $format("sw");
-        fnSB: $format("lb");
-        fnSH: $format("lh");
-				default: $format("unsupport Store 0x%0x", inst);
-			endcase;
-			ret = ret + $format(" [r%d 0x%0x] = r%d", rs1, immS, rs2);
-		end
-
-		opMiscMem: begin
-			ret = case (funct3)
-				fnFENCE: $format("fence");
-				fnFENCEI: $format("fence.i");
-				default: $format("unsupport MiscMem 0x%0x", inst);
-			endcase;
-		end
-
-		opAmo: begin
-			ret = $format("unsupport Amo 0x%0x", inst);
-		end
-
-		opSystem: begin
-			case (funct3)
-				fnCSRRW, fnCSRRS: begin //fnCSRRC, fnCSRRWI, fnCSRRSI, fnCSRRCI: begin
-					ret = case(funct3)
-						fnCSRRW: $format("csrrw");
-						fnCSRRS: $format("csrrs");
-					endcase;
-					ret = ret + $format(" r%d csr0x%0x r%d", rd, immI[11:0], rs1);
-				end
-
-				fnPRIV: begin
-					ret = case (truncate(immI))
-						//privSCALL: $format("scall");
-						default: $format("unsupport System PRIV 0x%0x", inst);
-					endcase;
-				end
-
-				default: begin
-					ret = $format("unsupport System 0x%0x", inst);
-				end
-			endcase
-		end
-
-    opSched: begin
-			case (funct3)
-				fnTMC: begin
-				  ret = $format("tmc");
-					ret = ret + $format(" mask: r%d", rs1);
-				end
-				fnWSPAWN: begin
-				  ret = $format("wspawn");
-					ret = ret + $format(" count: r%d, pc: r%d", rs1, rs2);
-				end
-				fnSPLIT: begin
-					ret = rs2 == 0 ? $format("split") : $format("split_n");
-					ret = ret + $format(" top: r%d, pred: r%d", rd, rs1);
-				end
-				fnJOIN: begin
-				  ret = $format("join");
-					ret = ret + $format(" top: r%d", rs1);
-				end
-				fnBAR: begin
-				  ret = $format("bar");
-					ret = ret + $format(" barId: r%d, count: r%d", rs1, rs2);
-				end
-				fnPRED: begin
-					ret = rd == 0 ? $format("pred") : $format("pred_n");
-					ret = ret + $format(" pred: r%d, restore_mask: r%d", rs1, rs2);
-				end
-				default: begin
-					ret = $format("unsupport Sched 0x%0x", inst);
-				end
-			endcase
-		end
-
-		default: begin
-			ret = $format("unsupport 0x%0x", inst);
-		end
-	endcase
-
-  return ret;
-
-endfunction
 

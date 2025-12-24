@@ -1,13 +1,18 @@
 import Fifo::*;
+import FIFOF::*;
 import Vector::*;
 
-typedef 17 MulWidth;
-typedef TMul#(2, MulWidth) AddWidth;
+function UInt#(TLog#(w)) countLeadingZeroes(Bit#(w) in) =
+  // if Invalid, there must be 2ʷ zeroes, which does not fit
+  fromMaybe(?, findIndex(id, reverse(unpack(in))));
+
+typedef 16 MulWidth;
+typedef TAdd#(MulWidth, MulWidth) AddWidth;
 
 // Fused Multiply-Add (FMA)
 interface UnsafeFMA;
   (* always_ready *)
-  method Action enq(UInt#(MulWidth) a, UInt#(MulWidth) b, UInt#(AddWidth) c, Bool sub);
+  method Action enq(UInt#(MulWidth) a, UInt#(MulWidth) b, UInt#(AddWidth) c);
   (* always_ready *)
   method UInt#(TAdd#(1, AddWidth)) first;
 endinterface
@@ -20,12 +25,12 @@ module mkUnsafeFMA (UnsafeFMA);
   Reg#(UInt#(AddWidth)) c_r <- mkReg(0);
   Reg#(UInt#(TAdd#(1, AddWidth))) p_r <- mkReg(0);
 
-  method Action enq(UInt#(MulWidth) a, UInt#(MulWidth) b, UInt#(AddWidth) c, Bool sub);
+  method Action enq(UInt#(MulWidth) a, UInt#(MulWidth) b, UInt#(AddWidth) c);
     a_r <= a;
     b_r <= b;
     c_r <= c;
     UInt#(TAdd#(1, AddWidth)) p = extend(unsignedMul(a_r, b_r));
-    p_r <= sub ? p - extend(c_r) : p + extend(c_r);
+    p_r <= p + extend(c_r);
   endmethod
 
   method first = p_r;
@@ -35,39 +40,43 @@ typedef struct {
   UInt#(MulWidth) a;
   UInt#(MulWidth) b;
   UInt#(AddWidth) c;
-  Bool sub;
 } FMAReq deriving (Bits, Eq, FShow);
 
-interface FMA;
-  method Action enq(UInt#(MulWidth) a, UInt#(MulWidth) b, UInt#(AddWidth) c, Bool sub);
-  method UInt#(TAdd#(1, AddWidth)) first; // unguarded
+interface FMA#(numeric type n);
+  method Action enq(UInt#(n) a, UInt#(n) b, UInt#(TAdd#(n, n)) c);
+  method UInt#(TAdd#(1, TAdd#(n, n))) first;
   method Action deq;
+  method Action clear;
 endinterface
 
 (* synthesize *)
-module mkFMA (FMA);
+module mkBaseFMA (FMA#(MulWidth));
   let m <- mkUnsafeFMA;
   let computed <- mkReg(False);
   let latched <- mkReg(False);
   RWire#(void) deqReq <- mkRWire;
+  RWire#(void) clearReq <- mkRWire;
   RWire#(FMAReq) enqReq <- mkRWire;
 
   (* fire_when_enabled, no_implicit_conditions *)
   rule canonicalize;
-    if (enqReq.wget matches tagged Valid .req) begin
-      match FMAReq {a: .a, b: .b, c: .c, sub: .sub} = req;
-      m.enq(a, b, c, sub);
+    if (isValid(clearReq.wget)) begin
+      computed <= False;
+      latched <= False;
+    end else if (enqReq.wget matches tagged Valid .req) begin
+      match FMAReq {a: .a, b: .b, c: .c} = req;
+      m.enq(a, b, c);
       computed <= latched;
       latched <= True;
     end else if (isValid(deqReq.wget) || !computed) begin
-      m.enq(?, ?, ?, ?);
+      m.enq(?, ?, ?);
       computed <= latched;
       latched <= False;
     end
   endrule
 
-  method Action enq(UInt#(MulWidth) a, UInt#(MulWidth) b, UInt#(AddWidth) c, Bool sub) if (isValid(deqReq.wget) || !computed);
-    enqReq.wset(FMAReq {a: a, b: b, c: c, sub: sub});
+  method Action enq(UInt#(MulWidth) a, UInt#(MulWidth) b, UInt#(AddWidth) c) if (isValid(deqReq.wget) || !computed);
+    enqReq.wset(FMAReq {a: a, b: b, c: c});
   endmethod
 
   method UInt#(TAdd#(1, AddWidth)) first = m.first;
@@ -75,146 +84,238 @@ module mkFMA (FMA);
   method Action deq if (computed);
     deqReq.wset(?);
   endmethod
+
+  method Action clear;
+    clearReq.wset(?);
+  endmethod
 endmodule
 
-interface Mul32;
-  method Action enq(Bool x_is_signed, Bit#(32) x, Bool y_is_signed, Bit#(32) y);
-  method Bit#(64) first;
+// Fused Multiply-Add Typeclass
+typeclass UnsignedFMA#(numeric type n);
+  module mkUnsignedFMA (FMA#(n));
+endtypeclass
+
+instance UnsignedFMA#(MulWidth);
+  module mkUnsignedFMA (FMA#(MulWidth));
+    let m <- mkBaseFMA;
+    return m;
+  endmodule
+endinstance
+
+instance UnsignedFMA#(n) provisos (
+  Add#(4, lgn, TLog#(hn)), Mul#(2, lgn, l), Div#(n, 2, hn), Add#(hn, hn, n), UnsignedFMA#(hn)
+);
+
+  module mkUnsignedFMA (FMA#(n));
+    let vn = valueOf(n);
+    let vhn = valueOf(hn);
+
+    FMA#(hn) mulUpper <- mkUnsignedFMA;
+    FMA#(hn) mulMiddle <- mkUnsignedFMA;
+    FMA#(hn) mulLower <- mkUnsignedFMA;
+
+    FIFOF#(Tuple2#(Bit#(TAdd#(1, hn)), Bit#(TAdd#(1, hn)))) midArgs <- mkLFIFOF;
+    Fifo#(TAdd#(2, l), Bit#(TAdd#(1, n))) midZ <- mkLatencyFifo(True, True);
+    Fifo#(TAdd#(2, l), Bool) midNeg <- mkLatencyFifo(True, True);
+    FIFOF#(Bit#(TAdd#(1, n))) midAdj <- mkLFIFOF;
+
+    FIFOF#(Bit#(TAdd#(1, n))) upperRes <- mkLFIFOF;
+    FIFOF#(Bit#(hn)) lowerRes <- mkLFIFOF;
+
+    FIFOF#(UInt#(TAdd#(1, TAdd#(n, n)))) res <- mkFIFOF;
+    Reg#(Bool) noClear <- mkReg(True);
+
+    // t = 1
+    (* fire_when_enabled *)
+    rule mult_middle;
+      match {.midx, .midy} = midArgs.first;
+      let xNeg = msb(midx);
+      let yNeg = msb(midy);
+      Bit#(hn) midx_val = truncate(midx);
+      Bit#(hn) midy_val = truncate(midy);
+      Bit#(hn) adj = -((pack(replicate(yNeg)) & midx_val) + (pack(replicate(xNeg)) & midy_val));
+      Bool neg = (xNeg != yNeg) && (midx != 0) && (midy != 0);
+
+      mulMiddle.enq(unpack(midx_val), unpack(midy_val), unpack({adj, 0}));
+      midNeg.enq(neg);
+
+      midArgs.deq;
+    endrule
+
+    // t = latency(FMA#(hn))
+    (* fire_when_enabled *)
+    rule process_upper_lower;
+      let high = pack(mulUpper.first);
+      let midz = midZ.first;
+      let low = pack(mulLower.first);
+
+      upperRes.enq(high);
+      midAdj.enq(high + low + (low >> vhn) + midz);
+      lowerRes.enq(low[vhn-1 : 0]);
+
+      mulUpper.deq;
+      midZ.deq;
+      mulLower.deq;
+    endrule
+
+    // t = latency(FMA#(hn)) + 1
+    (* fire_when_enabled *)
+    rule compute_middle;
+      let low = lowerRes.first;
+      let high = upperRes.first;
+      let neg = midNeg.first;
+      let adj = midAdj.first;
+      Bit#(TAdd#(1, n)) mid = {pack(neg), pack(mulMiddle.first)[vn-1 : 0]};
+
+      mid = mid + adj;
+      high = high + (mid >> vhn);
+      res.enq(unpack({high, mid[vhn-1 : 0], low}));
+
+      lowerRes.deq;
+      upperRes.deq;
+      midNeg.deq;
+      midAdj.deq;
+      mulMiddle.deq;
+    endrule
+
+    (* fire_when_enabled, no_implicit_conditions *)
+    rule do_clear(!noClear);
+      mulUpper.clear;
+      mulMiddle.clear;
+      mulLower.clear;
+      midArgs.clear;
+      midZ.clear;
+      midNeg.clear;
+      midAdj.clear;
+      upperRes.clear;
+      lowerRes.clear;
+      res.clear;
+      noClear <= True;
+    endrule
+
+    // t = 0
+    method Action enq(UInt#(n) x, UInt#(n) y, UInt#(TAdd#(n, n)) z);
+      Bit#(hn) x1 = pack(x)[vn-1 : vhn];
+      Bit#(hn) x2 = pack(x)[vhn-1 : 0];
+      Bit#(hn) y1 = pack(y)[vn-1 : vhn];
+      Bit#(hn) y2 = pack(y)[vhn-1 : 0];
+      Bit#(hn) z1 = pack(z)[2*vn-1 : vn+vhn];
+      Bit#(n) z2 = pack(z)[vn+vhn-1 : vhn];
+      Bit#(hn) z3 = pack(z)[vhn-1 : 0];
+
+      Bit#(TAdd#(1, hn)) midx = zeroExtend(x2) - zeroExtend(x1);
+      Bit#(TAdd#(1, hn)) midy = zeroExtend(y1) - zeroExtend(y2);
+
+      mulUpper.enq(unpack(x1), unpack(y1), unpack({z1, 0}));
+      midArgs.enq(tuple2(midx, midy));
+      midZ.enq(zeroExtend(z2) - zeroExtend({z1, z3}));
+      mulLower.enq(unpack(x2), unpack(y2), unpack({0, z3}));
+    endmethod
+
+    // t = latency(FMA#(hn)) + 2
+    method first = res.first;
+    method Action deq; res.deq; endmethod
+    method Action clear if (noClear); noClear <= False; endmethod
+  endmodule
+endinstance
+
+interface Multiplier#(numeric type n);
+  method Action enq(Bool x_is_signed, Bit#(n) x, Bool y_is_signed, Bit#(n) y);
+  method Bit#(TAdd#(n, n)) first;
   method Action deq;
+  method Action clear;
 endinterface
 
-// latency 5
-(* synthesize *)
-module mkMul32 (Mul32);
-  let mulUpper <- mkFMA;
-  let mulMiddle <- mkFMA;
-  let mulLower <- mkFMA;
-  Fifo#(1, Tuple2#(Bit#(32), Bit#(32))) uxy <- mkPipelineFifo(True, True);
-  Fifo#(1, Tuple2#(UInt#(MulWidth), UInt#(MulWidth))) middleArgs <- mkPipelineFifo(True, True);
-  Fifo#(2, Bit#(32)) upperRes <- mkLatencyFifo(True, True);
-  Fifo#(2, Bit#(32)) lowerRes <- mkLatencyFifo(True, True);
-  Fifo#(4, Bool) resNeg <- mkLatencyFifo(True, True);
-  Fifo#(2, Bit#(64)) res <- mkCFFifo(True, True);
+module mkMultiplier (Multiplier#(n)) provisos (UnsignedFMA#(n));
+  FMA#(n) fma <- mkUnsignedFMA;
 
-  (* fire_when_enabled *)
-  rule compute_middle;
-    match {.ux, .uy} = uxy.first;
-    UInt#(MulWidth) uxUpper = extend(unpack(ux[31:16]));
-    UInt#(MulWidth) uxLower = extend(unpack(ux[15:0]));
-    UInt#(MulWidth) uyUpper = extend(unpack(uy[31:16]));
-    UInt#(MulWidth) uyLower = extend(unpack(uy[15:0]));
-    middleArgs.enq(tuple2(uxUpper + uxLower, uyUpper + uyLower));
-    uxy.deq;
-  endrule
+  method Action enq(Bool x_is_signed, Bit#(n) x, Bool y_is_signed, Bit#(n) y);
+    let xNeg = pack(x_is_signed) & msb(x);
+    let yNeg = pack(y_is_signed) & msb(y);
+    let adj = -((pack(replicate(yNeg)) & x) + (pack(replicate(xNeg)) & y));
 
-  (* fire_when_enabled *)
-  rule multiply_middle;
-    Bit#(32) upper = truncate(pack(mulUpper.first));
-    Bit#(32) lower = truncate(pack(mulLower.first));
-    match {.ux, .uy} = middleArgs.first;
-
-    let lower1 = lower - extend(lower[31:16]);
-    UInt#(AddWidth) middleSub = unpack(extend(upper)) + unpack(extend(lower1));
-
-    upperRes.enq(upper);
-    mulMiddle.enq(ux, uy, middleSub, True);
-    lowerRes.enq(lower);
-
-    mulUpper.deq;
-    mulLower.deq;
-    middleArgs.deq;
-  endrule
-
-  (* fire_when_enabled *)
-  rule compute_end;
-    let upper = upperRes.first;
-    let middle = pack(mulMiddle.first);
-    let lower = lowerRes.first;
-    let neg = resNeg.first;
-
-    Bit#(32) upper1 = upper + extend(middle[32:16]);
-    Bit#(64) abs = {upper1, middle[15:0], lower[15:0]};
-    res.enq(neg ? -abs : abs);
-
-    upperRes.deq;
-    mulMiddle.deq;
-    lowerRes.deq;
-    resNeg.deq;
-  endrule
-
-  method Action enq(Bool x_is_signed, Bit#(32) x, Bool y_is_signed, Bit#(32) y);
-    Bool xNeg = x_is_signed && unpack(msb(x));
-    Bool yNeg = y_is_signed && unpack(msb(y));
-    Bit#(32) ux = xNeg ? -x : x;
-    UInt#(MulWidth) uxUpper = extend(unpack(ux[31:16]));
-    UInt#(MulWidth) uxLower = extend(unpack(ux[15:0]));
-    Bit#(32) uy = yNeg ? -y : y;
-    UInt#(MulWidth) uyUpper = extend(unpack(uy[31:16]));
-    UInt#(MulWidth) uyLower = extend(unpack(uy[15:0]));
-
-    mulUpper.enq(uxUpper, uyUpper, 0, False);
-    uxy.enq(tuple2(ux, uy));
-    mulLower.enq(uxLower, uyLower, 0, False);
-    resNeg.enq(xNeg != yNeg);
+    fma.enq(unpack(x), unpack(y), unpack({adj, 0}));
   endmethod
 
-  method first = res.first;
-  method Action deq; res.deq; endmethod
+  method first = truncate(pack(fma.first));
+  method Action deq = fma.deq;
+  method Action clear = fma.clear;
 endmodule
 
-interface Div32;
-  method Action enq(Bool num_is_signed, Bit#(32) num, Bool den_is_signed, Bit#(32) den);
-  method Tuple2#(Bit#(32), Bit#(32)) first;
+(* synthesize *)
+module mkMul32 (Multiplier#(32));
+/*
+  Fifo#(4, UInt#(64)) fma <- mkLatencyFifo(True, True); // try out register retiming
+
+  method Action enq(Bool x_is_signed, Bit#(32) x, Bool y_is_signed, Bit#(32) y);
+    let xNeg = pack(x_is_signed) & msb(x);
+    let yNeg = pack(y_is_signed) & msb(y);
+    let adj = -((pack(replicate(yNeg)) & x) + (pack(replicate(xNeg)) & y));
+
+    fma.enq(unsignedMul(unpack(x), unpack(y)) + unpack({adj, 0}));
+  endmethod
+
+  method first = pack(fma.first);
+  method Action deq = fma.deq;
+  method Action clear = fma.clear;
+*/
+  Multiplier#(32) m <- mkMultiplier;
+  return m;
+endmodule
+
+interface Divider#(numeric type n);
+  method Action enq(Bool num_is_signed, Bit#(n) num, Bool den_is_signed, Bit#(n) den);
+  method Tuple2#(Bit#(n), Bit#(n)) first;
   method Action deq;
+  method Action clear;
 endinterface
 
 typedef struct {
   Bool done;
   Bool qneg;
   Bool rneg;
-  Bit#(32) quot; // quotient
-  Bit#(32) den;  // denominator
-  Bit#(32) rem;  // remainder
-} DivRes deriving (Bits, Eq, FShow);
+  UInt#(TLog#(n)) dExp;
+  Bit#(n) quot; // quotient
+  Bit#(n) den;  // denominator
+  Bit#(n) rem;  // remainder
+} DivRes#(numeric type n) deriving (Bits, Eq, FShow);
 
-typedef function DivRes d(DivRes x) DivStep;
+typedef function DivRes#(n) d(DivRes#(n) x) DivStep#(numeric type n);
 
-(* noinline *)
-function DivRes divStep(DivRes x);
-  match DivRes {qneg: .qneg, rneg: .rneg, quot: .quot, den: .den, rem: .rem} = x;
-  Vector#(32, Bool) r = reverse(unpack(rem));
-  let rExp = fromMaybe(?, findIndex(id, r)); // rem = 2 ^ (32 - rExp) * 1.xxxx...
-  Vector#(32, Bool) d = reverse(unpack(den));
-  let dExp = fromMaybe(?, findIndex(id, d)); // den = 2 ^ (32 - dExp) * 1.xxxx...
+function DivRes#(n) divStep(DivRes#(n) x);
+  let vn = valueOf(n);
+
+  match DivRes {qneg: .qneg, rneg: .rneg, dExp: .dExp, quot: .quot, den: .den, rem: .rem} = x;
+  let rExp = countLeadingZeroes(rem); // rem = 2 ^ (n - rExp) * 1.xxxx...
   let shamt = dExp - rExp;
-  let quotShift = 32'b1 << shamt;
+  Bit#(n) quotShift = 1 << shamt;
   let denShift = den << shamt;
 
   let quot1 = quot | quotShift;
-  let quot2 = quot | {1'b0, quotShift[31:1]};
+  let quot2 = quot | (quotShift >> 1);
   let rem1 = rem - denShift;
-  let rem2 = rem - {1'b0, denShift[31:1]};
-  Bool rem1Neg = unpack(rem1[31]);
+  let rem2 = rem - (denShift >> 1);
+  Bool rem1Neg = unpack(msb(rem1));
 
   let done = den == 0 || rem < den;
   if (!done) quot = rem1Neg ? quot2 : quot1;
   if (!done) rem = rem1Neg ? rem2 : rem1;
-  return DivRes {done: done, qneg: qneg, rneg: rneg, quot: quot, den: den, rem: rem};
+  return DivRes {done: done, qneg: qneg, rneg: rneg, dExp: dExp, quot: quot, den: den, rem: rem};
 endfunction
 
 typedef 4 DivStage;
 
-(* synthesize *)
-module mkDiv32 (Div32);
-  Vector#(DivStage, DivStep) divs = replicate(divStep);
-  Vector#(DivStage, Reg#(Maybe#(DivRes))) res <- replicateM(mkReg(tagged Invalid));
-  Fifo#(2, Tuple2#(Bit#(32), Bit#(32))) out <- mkCFFifo(False, False);
-  RWire#(DivRes) enqReq <- mkRWire;
+module mkDivider#(DivStep#(n) step) (Divider#(n));
+  Vector#(DivStage, DivStep#(n)) divs = replicate(step);
+  Vector#(DivStage, Reg#(Maybe#(DivRes#(n)))) res <- replicateM(mkReg(tagged Invalid));
+  Fifo#(2, Tuple2#(Bit#(n), Bit#(n))) out <- mkCFFifo(False, False);
+  RWire#(DivRes#(n)) enqReq <- mkRWire;
+  Reg#(Bool) noClear <- mkReg(True);
 
-  function DivRes genDiv(Integer i) = divs[i](fromMaybe(?, res[i]));
+  function DivRes#(n) genDiv(Integer i) = divs[i](fromMaybe(?, res[i]));
   function Bool genVal(Integer i) = isValid(res[i]);
 
-  Vector#(DivStage, DivRes) stepped = genWith(genDiv);
+  Vector#(DivStage, DivRes#(n)) stepped = genWith(genDiv);
   Vector#(DivStage, Bool) valid = genWith(genVal);
   Vector#(TAdd#(1, DivStage), Bool) notFull = ?;
   Integer divStage = valueOf(DivStage);
@@ -223,7 +324,7 @@ module mkDiv32 (Div32);
     notFull[i] = notFull[i+1] || !valid[i];
 
   (* fire_when_enabled, no_implicit_conditions *)
-  rule shift;
+  rule shift(noClear);
     if (res[divStage-1] matches tagged Valid .r) begin
       match DivRes {done: .done, qneg: .qneg, rneg: .rneg, quot: .quot, rem: .rem} = r;
       if (out.notFull && done) out.enq(tuple2(qneg ? -quot : quot, rneg ? -rem : rem));
@@ -239,18 +340,40 @@ module mkDiv32 (Div32);
       res[0] <= valid[0] ? tagged Valid stepped[0] : tagged Invalid;
   endrule
 
-  method Action enq(Bool nsigned, Bit#(32) num, Bool dsigned, Bit#(32) den) if (notFull[0]);
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule do_clear(!noClear);
+    for (Integer i = 0; i < divStage; i = i + 1)
+      res[i] <= tagged Invalid;
+    out.clear;
+    noClear <= True;
+  endrule
+
+  method Action enq(Bool nsigned, Bit#(n) num, Bool dsigned, Bit#(n) den) if (notFull[0]);
     Bool nneg = nsigned && unpack(msb(num));
     Bool dneg = dsigned && unpack(msb(den));
     let qneg = nneg != dneg;
     let rneg = nneg;
     let rem = nneg ? -num : num;
-    let den1 = dneg ? -den : den;
-    let req = DivRes {done: False, qneg: qneg, rneg: rneg, quot: 0, den: den1, rem: rem};
+    let d = dneg ? ~den : den;
+    let dExp = countLeadingZeroes(d); // den = 2 ^ (n - dExp) * 1.xxxx...
+    let dPow2 = dneg && (((-1) >> dExp) == d); // checks if d = -2ᵐ for some m
+    dExp = dExp - (dPow2 ? 1 : 0);
+    let den1 = d + (dneg ? 1 : 0);
+    let req = DivRes {done: False, qneg: qneg, rneg: rneg, dExp: dExp, quot: 0, den: den1, rem: rem};
     enqReq.wset(req);
   endmethod
 
   method first if (out.notEmpty) = out.first;
   method deq if (out.notEmpty) = out.deq;
+  method Action clear if (noClear); noClear <= False; endmethod
+endmodule
+
+(* noinline *)
+function DivRes#(32) divStep32(DivRes#(32) x) = divStep(x);
+
+(* synthesize *)
+module mkDiv32 (Divider#(32));
+  Divider#(32) d <- mkDivider(divStep32);
+  return d;
 endmodule
 

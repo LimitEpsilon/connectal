@@ -20,8 +20,7 @@ BSVPATH += / \
 	$(PLATFORMDIR)/lib
 
 CPPFILES += \
-	main.cpp \
-	loadelf.cpp
+	main.cpp
 
 # set main clock period
 CONNECTALFLAGS += --mainclockperiod=8

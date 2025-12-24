@@ -26,6 +26,8 @@ typedef 25 MemHeight; // h
 typedef 512 PhysDataSz; // w8 = 8 * 2ʷ
 typedef TLog#(TDiv#(PhysDataSz, 8)) MemWidth; // w
 typedef TAdd#(MemHeight, MemWidth) PhysAddrSz;
+typedef Bit#(PhysDataSz) PhysData;
+typedef Bit#(PhysAddrSz) PhysAddr;
 
 typedef 16 IMemAddrSz;
 typedef Bit#(IMemAddrSz) IMemAddr;
