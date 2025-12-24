@@ -6,16 +6,16 @@ CFLAGS += -I /opt/homebrew/include/libelf -I /opt/homebrew/include -L /opt/homeb
 endif
 
 vecadd: vecadd.cpp
-	$(CC) $(CFLAGS) -o vecadd vecadd.cpp main.c
+	$(CC) -o vecadd vecadd.cpp main.c $(CFLAGS)
 
 sgemm: sgemm.cpp
-	$(CC) $(CFLAGS) -o sgemm sgemm.cpp main.c
+	$(CC) -o sgemm sgemm.cpp main.c $(CFLAGS)
 
 mstress: mstress.cpp
-	$(CC) $(CFLAGS) -o mstress mstress.cpp main.c
+	$(CC) -o mstress mstress.cpp main.c $(CFLAGS)
 
 madmax: madmax.cpp
-	$(CC) $(CFLAGS) -o madmax madmax.cpp main.c
+	$(CC) -o madmax madmax.cpp main.c $(CFLAGS)
 
 all: loadelf.h main.c vecadd sgemm mstress madmax
 

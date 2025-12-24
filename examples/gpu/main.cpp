@@ -60,7 +60,7 @@ int main(int argc, char *const *argv) {
     exit(1);
   }
 
-  if (open(server_path, O_CREAT) == -1) {
+  if (open(server_path, O_CREAT, 0666) == -1) {
     fprintf(stderr, "SERVER: Error creating socket file: %s\n", strerror(errno));
     exit(1);
   }
@@ -110,7 +110,11 @@ int main(int argc, char *const *argv) {
   if (pid == 0) {
     char *env[] = {NULL};
 
-    realpath(argv[1], pathbuf);
+    if (realpath(argv[1], pathbuf) == NULL) {
+      fprintf(stderr, "Failed to execute %s, %s\n", argv[1], strerror(errno));
+      exit(1);
+    }
+
     execve(pathbuf, argv + 1, env);
 
     fprintf(stderr, "Failed to execute %s, %s\n", argv[1], strerror(errno));
@@ -128,12 +132,12 @@ int main(int argc, char *const *argv) {
   connectalProc = new ConnectalProcRequestProxy(IfcNames_ConnectalProcRequestS2H);
   ind = new ConnectalProcIndication(IfcNames_ConnectalProcIndicationH2S);
 
-  uint64_t loaded = -1;
+  uint64_t loaded = (uint64_t)-1;
   do {
     safe_recv(&loaded, __LINE__);
-    if (loaded != -1)
+    if (loaded != (uint64_t)-1)
       connectalProc->hostToProc(loaded);
-  } while (loaded != -1);
+  } while (loaded != (uint64_t)-1);
 
   close(server_sock);
   close(client_sock);

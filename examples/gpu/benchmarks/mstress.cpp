@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <vector>
+#include <cmath>
 #include "mem_alloc.h"
 
 // defined in common.h for each test case

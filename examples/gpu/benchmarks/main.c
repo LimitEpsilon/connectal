@@ -73,7 +73,7 @@ int main(int argc, char *const *argv) {
     exit(1);
   }
 
-  if (open(client_path, O_CREAT) == -1) {
+  if (open(client_path, O_CREAT, 0666) == -1) {
     fprintf(stderr, "CLIENT: Error creating socket file: %s\n", strerror(errno));
     exit(1);
   }
@@ -196,7 +196,7 @@ int main(int argc, char *const *argv) {
   if (msg_data == 0)
     fprintf(stderr, "PASSED\n");
   else {
-    fprintf(stderr, "FAILED: exit code = %d\n", data);
+    fprintf(stderr, "FAILED: exit code = %d\n", (int)data);
     goto cleanup_label;
   }
 
@@ -208,7 +208,7 @@ int main(int argc, char *const *argv) {
   safe_send(&data, __LINE__);
   safe_recv(&msg, __LINE__); // ACK
 
-  data = -1; // signal the server that I am done
+  data = (uint64_t)-1; // signal the server that I am done
   safe_send(&data, __LINE__);
   vx_validate();
 
