@@ -1,4 +1,3 @@
-// Adapted from https://github.com/mtikekar/advanced_bsv
 import Vector :: *;
 import GetPut :: *;
 import FIFOF  :: *;
@@ -42,7 +41,9 @@ module mkMergeTree(MergeTree#(n, t)) provisos (Bits#(t, tSz));
     {tagged Invalid, tagged Valid .iF}: iF;
     {tagged Invalid, tagged Invalid}: ?;
   endcase;
-  let rdy = isValid(idxT) || isValid(idxF);
+  let rdyT = any(id, validT);
+  let rdyF = any(id, validF);
+  let rdy = rdyT || rdyF;
 
   (* fire_when_enabled, no_implicit_conditions *)
   rule do_clear(!noClear);
@@ -56,7 +57,7 @@ module mkMergeTree(MergeTree#(n, t)) provisos (Bits#(t, tSz));
 
   interface iport = inner;
   method Action deq if (noClear && rdy);
-    let e = isValid(idxT) && (!isValid(idxF) || cur);
+    let e = rdyT && (!rdyF || cur);
     iports[idx].deq;
     epochs[idx] <= !e;
     cur <= e;

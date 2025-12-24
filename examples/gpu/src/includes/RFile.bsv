@@ -18,15 +18,19 @@ import SpecialFIFOs::*;
 import Fifo::*;
 import BRAM::*;
 
-// 32 * (number of warps) ÷ 2 registers per lane
-typedef TAdd#(4, LogWarpNum) LaneRIndxSz;
+// (32 (GPR) + 32 (FPR)) * (number of warps) ÷ 2 registers per lane
+typedef TAdd#(5, LogWarpNum) LaneRIndxSz;
+typedef TAdd#(4, LogWarpNum) FPRIndxSz;
 typedef Bit#(LaneRIndxSz) LaneRIndx;
+typedef Bit#(FPRIndxSz) FPRIndx;
 typedef TExp#(LaneRIndxSz) RegPerLane;
+typedef TExp#(FPRIndxSz) FPRPerLane;
 
 typedef struct {
   Bool    conv;
   RIndx   rs1;
   RIndx   rs2;
+  RIndx   rs3;
 } RFRdReq deriving (Bits, Eq, FShow);
 
 typedef struct {
@@ -41,28 +45,30 @@ typedef struct {
   Bool    conv;
   RIndx   rs1;
   RIndx   rs2;
+  RIndx   rs3;
   RIndx   rd;
   Bit#(n) mask;
   Vector#(n, Data) datas;
 } RFReq#(numeric type n) deriving (Bits, Eq, FShow);
 
 function RFReq#(ThreadNum) fromRdReq(RFRdReq req);
-  match RFRdReq {conv: .conv, rs1: .rs1, rs2: .rs2} = req;
+  match RFRdReq {conv: .conv, rs1: .rs1, rs2: .rs2, rs3: .rs3} = req;
   return RFReq {
-    write: False, conv: conv, rs1: rs1, rs2: rs2, rd: ?, mask: ?, datas: ?
+    write: False, conv: conv, rs1: rs1, rs2: rs2, rs3: rs3, rd: ?, mask: ?, datas: ?
   };
 endfunction
 
 function RFReq#(n) fromWrReq(RFWrReq#(n) req);
   match RFWrReq {conv: .conv, rd: .rd, mask: .mask, datas: .datas} = req;
   return RFReq {
-    write: True, conv: conv, rs1: ?, rs2: ?, rd: rd, mask: mask, datas: datas
+    write: True, conv: conv, rs1: ?, rs2: ?, rs3: ?, rd: rd, mask: mask, datas: datas
   };
 endfunction
 
 typedef struct {
   Vector#(n, Data) rv1;
   Vector#(n, Data) rv2;
+  Vector#(n, Data) rv3;
 } RFResp#(numeric type n) deriving (Bits, Eq, FShow);
 
 interface VectorRFile#(numeric type n);
@@ -79,13 +85,23 @@ module mkRFileBRAM(BRAM2Port#(LaneRIndx, Data));
   return ram;
 endmodule
 
+(* synthesize *)
+module mkFPRBRAM(BRAM1Port#(FPRIndx, Data));
+  BRAM_Configure cfg = defaultValue;
+  cfg.memorySize = valueOf(FPRPerLane);
+  let ram <- mkBRAM1Server(cfg);
+  return ram;
+endmodule
+
 module mkVecRFile(VectorRFile#(n));
   Vector#(n, BRAM2Port#(LaneRIndx, Data)) rfiles <- replicateM(mkRFileBRAM);
+  Vector#(n, BRAM1Port#(FPRIndx, Data)) fpr <- replicateM(mkFPRBRAM);
   Fifo#(4, Tuple2#(RFReq#(n), Bit#(TSub#(LogWarpNum, 1)))) reqs <- mkBRAMFifo(True, True);
   FIFOF#(Bool) respAisZero <- mkGFIFOF(False, True);
   FIFOF#(Vector#(n, Data)) respA <- mkBypassFIFOF;
   FIFOF#(Bool) respBisZero <- mkGFIFOF(False, True);
   FIFOF#(Vector#(n, Data)) respB <- mkBypassFIFOF;
+  FIFOF#(Vector#(n, Data)) respC <- mkBypassFIFOF;
   Reg#(Bool) noClear <- mkReg(True);
 
   (* fire_when_enabled, no_implicit_conditions *)
@@ -93,27 +109,36 @@ module mkVecRFile(VectorRFile#(n));
     for (Integer i = 0; i < valueOf(n); i = i + 1) begin
       rfiles[i].portAClear;
       rfiles[i].portBClear;
+      fpr[i].portAClear;
     end
     reqs.clear;
     respAisZero.clear;
     respA.clear;
     respBisZero.clear;
     respB.clear;
+    respC.clear;
     noClear <= True;
   endrule
 
   (* fire_when_enabled *)
   rule req_BRAM;
     match {.req, .wid} = reqs.first;
-    match RFReq {write: .write, conv: .conv, rs1: .rs1, rs2: .rs2, rd: .rd, mask: .mask, datas: .datas} = req;
+    match RFReq {write: .write, conv: .conv, rs1: .rs1, rs2: .rs2, rs3: .rs3, rd: .rd, mask: .mask, datas: .datas} = req;
     reqs.deq;
     if (write) begin
       for (Integer i = 0; i < valueOf(n); i = i + 1) begin
-        if ((rd != 0 || conv) && unpack(mask[i]))
+        if ((pack(rd) != 0 || conv) && unpack(mask[i]))
           rfiles[i].portA.request.put(BRAMRequest {
             write: True,
             responseOnWrite: False,
-            address: {rd, wid},
+            address: {pack(rd), wid},
+            datain: datas[i]
+          });
+        if (rd.isFpr && unpack(mask[i]))
+          fpr[i].portA.request.put(BRAMRequest {
+            write: True,
+            responseOnWrite: False,
+            address: {rd.idx, wid},
             datain: datas[i]
           });
       end
@@ -122,18 +147,24 @@ module mkVecRFile(VectorRFile#(n));
         rfiles[i].portA.request.put(BRAMRequest {
           write: False,
           responseOnWrite: False,
-          address: {rs1, wid},
+          address: {pack(rs1), wid},
           datain: ?
         });
         rfiles[i].portB.request.put(BRAMRequest {
           write: False,
           responseOnWrite: False,
-          address: {conv ? 0 : rs2, wid},
+          address: {conv ? 0 : pack(rs2), wid},
+          datain: ?
+        });
+        fpr[i].portA.request.put(BRAMRequest {
+          write: False,
+          responseOnWrite: False,
+          address: {rs3.idx, wid},
           datain: ?
         });
       end
-      respAisZero.enq(rs1 == 0);
-      respBisZero.enq(!conv && rs2 == 0);
+      respAisZero.enq(pack(rs1) == 0);
+      respBisZero.enq(!conv && pack(rs2) == 0);
     end
   endrule
 
@@ -157,6 +188,16 @@ module mkVecRFile(VectorRFile#(n));
     respB.enq(resp);
   endrule
 
+  (* fire_when_enabled *)
+  rule respC_BRAM;
+    Vector#(n, Data) resp;
+    for (Integer i = 0; i < valueOf(n); i = i + 1) begin
+      let r <- fpr[i].portA.response.get;
+      resp[i] = r;
+    end
+    respC.enq(resp);
+  endrule
+
   method Action ask(RFReq#(n) req, Bit#(TSub#(LogWarpNum, 1)) wid);
     reqs.enq(tuple2(req, wid));
   endmethod
@@ -166,13 +207,15 @@ module mkVecRFile(VectorRFile#(n));
     let rv1isZero = respAisZero.first;
     let rv2 = respB.first;
     let rv2isZero = respBisZero.first;
+    let rv3 = respC.first;
     respA.deq;
     respAisZero.deq;
     respB.deq;
     respBisZero.deq;
+    respC.deq;
     if (rv1isZero) rv1 = replicate(0);
     if (rv2isZero) rv2 = replicate(0);
-    return RFResp {rv1: rv1, rv2: rv2};
+    return RFResp {rv1: rv1, rv2: rv2, rv3: rv3};
   endmethod
 
   method Action clear if (noClear); noClear <= False; endmethod
@@ -193,12 +236,18 @@ interface Scoreboard;
 endinterface
 
 (* synthesize *)
+module mkScoreboardIport(Fifo#(4, Tuple2#(RFRdReq, RFCont)));
+  let m <- mkCFFifo(False, False);
+  return m;
+endmodule
+
+(* synthesize *)
 module mkScoreboard(Scoreboard);
   // The correctness of this module depends on the output FIFO containing only one continuation
   // This is because we update the pending register when the continuation is dequeued
-  (* hide *) Reg#(Maybe#(Tuple2#(RFRdReq, RFCont))) out[2] <- mkCReg(2, tagged Invalid);
-  (* hide *) Vector#(TDiv#(WarpNum, 2), Fifo#(4, Tuple2#(RFRdReq, RFCont))) ibuf <- replicateM(mkBRAMFifo(False, False));
-  (* hide *) Vector#(TDiv#(WarpNum, 2), Reg#(Bit#(32))) pending <- replicateM(mkReg(0));
+  Reg#(Maybe#(Tuple2#(RFRdReq, RFCont))) out[2] <- mkCReg(2, tagged Invalid);
+  Vector#(TDiv#(WarpNum, 2), Fifo#(4, Tuple2#(RFRdReq, RFCont))) ibuf <- replicateM(mkScoreboardIport);
+  Vector#(TDiv#(WarpNum, 2), Reg#(Bit#(64))) pending <- replicateM(mkReg(0));
   Reg#(Bool) noClear <- mkReg(True);
   Vector#(TDiv#(WarpNum, 2), Put#(Tuple2#(RFRdReq, RFCont))) inner;
 
@@ -210,18 +259,28 @@ module mkScoreboard(Scoreboard);
 
   (* fire_when_enabled, no_implicit_conditions *)
   rule enq_out(!isValid(out[0]));
-    function Bool genIdx(Integer i);
+    Vector#(TDiv#(WarpNum, 2), Bool) isReady;
+    for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1) begin
       match {.req, .cont} = ibuf[i].first;
-      Bool rs1Pending = unpack(pending[i][req.rs1]);
-      Bool rs2Pending = !req.conv && unpack(pending[i][req.rs2]);
-      Bool dstPending = unpack(pending[i][cont.dst]);
-      return ibuf[i].notEmpty && !rs1Pending && !rs2Pending && !dstPending;
-    endfunction
-    Vector#(TDiv#(WarpNum, 2), Bool) isReady = genWith(genIdx);
-    let idx = findIndex(id, isReady);
-    if (idx matches tagged Valid .i) begin
-      out[0] <= tagged Valid ibuf[i].first;
-      ibuf[i].deq;
+      Bool rs1Pending = unpack(pending[i][pack(req.rs1)]);
+      Bool rs2Pending = !req.conv && unpack(pending[i][pack(req.rs2)]);
+      Bit#(32) fpr = pending[i][63:32];
+      Bool rs3Pending = req.rs3.isFpr && unpack(fpr[req.rs3.idx]);
+      Bool dstPending = unpack(pending[i][pack(cont.dst)]);
+      //  if (ibuf[i].notEmpty && rs1Pending)
+      //    $display("WID %d, rs1: %d locked", i, pack(req.rs1));
+      //  if (ibuf[i].notEmpty && rs2Pending)
+      //    $display("WID %d, rs2: %d locked", i, pack(req.rs2));
+      //  if (ibuf[i].notEmpty && rs3Pending)
+      //    $display("WID %d, rs3: %d locked", i, req.rs3.idx);
+      //  if (ibuf[i].notEmpty && dstPending)
+      //    $display("WID %d, rd: %d locked", i, pack(cont.dst));
+      isReady[i] = ibuf[i].notEmpty && !rs1Pending && !rs2Pending && !rs3Pending && !dstPending;
+    end
+    let idx = fromMaybe(?, findIndex(id, isReady));
+    if (any(id, isReady)) begin
+      out[0] <= tagged Valid ibuf[idx].first;
+      ibuf[idx].deq;
     end
   endrule
 
@@ -245,9 +304,9 @@ module mkScoreboard(Scoreboard);
     // if cont.dst == 0, it is cleared out anyway
     let nextPending =
       write
-      ? curPending & ~(1 << rd)
-      : curPending | (extend(pack(notEmpty)) << cont.dst);
-    pending[idx] <= {nextPending[31 : 1], 1'b0};
+      ? curPending & ~(1 << pack(rd))
+      : curPending | (extend(pack(notEmpty)) << pack(cont.dst));
+    pending[idx] <= nextPending & ~1;
     if (!write && notEmpty)
       out[1] <= tagged Invalid;
   endmethod

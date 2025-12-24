@@ -84,7 +84,6 @@ module mkVectorAlu(VectorAlu#(ThreadNum));
 
   (* fire_when_enabled *)
   rule compute_resp;
-    $display("compute_resp");
     let r = reqs.first;
     reqs.deq;
     function Data app(ScalarAlu a, Data v1, Data v2) = a(v1, v2, r.f);
@@ -121,7 +120,7 @@ endinterface
 
 (* synthesize *)
 module mkVectorMul(VectorMul#(ThreadNum));
-  Vector#(ThreadNum, Mul32) muls <- replicateM(mkMul32);
+  Vector#(ThreadNum, Multiplier#(DataSz)) muls <- replicateM(mkMul32);
   FIFOF#(MulReq#(ThreadNum)) reqs <- mkBypassFIFOF;
   Fifo#(5, Bool) respLower <- mkLatencyFifo(True, True);
   FIFOF#(Vector#(ThreadNum, Data)) resps <- mkBypassFIFOF;
@@ -157,7 +156,6 @@ module mkVectorMul(VectorMul#(ThreadNum));
     end
     resps.enq(res);
     respLower.deq;
-    $display("compute_resp_mul");
   endrule
 
   (* fire_when_enabled, no_implicit_conditions *)
@@ -195,7 +193,7 @@ endinterface
 
 (* synthesize *)
 module mkVectorDiv(VectorDiv#(ThreadNum));
-  Vector#(ThreadNum, Div32) divs <- replicateM(mkDiv32);
+  Vector#(ThreadNum, Divider#(32)) divs <- replicateM(mkDiv32);
   FIFOF#(DivReq#(ThreadNum)) reqs <- mkBypassFIFOF;
   Fifo#(TAdd#(1, DivStage), Bool) respQuot <- mkLatencyFifo(True, True);
   FIFOF#(Vector#(ThreadNum, Data)) resps <- mkBypassFIFOF;
@@ -224,7 +222,6 @@ module mkVectorDiv(VectorDiv#(ThreadNum));
     end
     resps.enq(res);
     respQuot.deq;
-    $display("compute_resp_div");
   endrule
 
   (* fire_when_enabled, no_implicit_conditions *)

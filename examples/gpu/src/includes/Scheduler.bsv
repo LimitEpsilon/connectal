@@ -48,6 +48,7 @@ typedef struct {
   Maybe#(StackPtr) next;
   Bit#(ThreadNum) divMask; // mask of threads that are still divergent
   Bit#(ThreadNum) convMask; // mask of threads that converged
+  Addr ipdom; // the PC of the immedite post-dominator
 } StackEnt deriving (Bits, Eq, FShow);
 
 typedef struct {
@@ -105,11 +106,6 @@ module mkScheduler(Scheduler);
 
   // done
   FIFOF#(void) done <- mkFIFOF;
-
-`ifdef SIMULATION
-  // debugging
-  Reg#(Bool) doReport[2] <- mkCReg(2, False);
-`endif
 
   // response
   // 0: TMC/PRED, 1: WSPAWN, 2: CONV, 3: BAR
@@ -189,7 +185,9 @@ module mkScheduler(Scheduler);
     let ptr = pack(fromMaybe(?, findIndex(id, unpack(allocMask)))); // never fails
     Bool isDivergent = (predMask != 0) && (predMask != mask);
     if (isDivergent) begin // allocate new entry
-      let ent = StackEnt{next: top, divMask: mask, convMask: 0};
+      let ent = StackEnt{next: top, divMask: mask, convMask: 0, ipdom: ?};
+      if (printDebug)
+        $display(fshow("Split: ") + fshow(warp) + fshow(ent));
       stacks.portB.request.put(BRAMRequest {
         write: True, address: {wid, ptr}, datain: ent, responseOnWrite: False
       });
@@ -206,22 +204,28 @@ module mkScheduler(Scheduler);
   rule do_join(stackInit && joinReqs.notEmpty);
     match JoinReq {warp: .warp, top: .top} = joinReqs.first;
     match Warp {wid: .wid, pc: .pc, mask: .mask} = warp;
+    match StackEnt {
+      next: .next, divMask: .divMask, convMask: .convMask, ipdom: .ipdom
+    } <- stacks.portA.response.get;
+
     let allocMask = stackAlloc[wid];
     if (top matches tagged Valid .ptr) begin
-      match StackEnt {
-        next: .next, divMask: .divMask, convMask: .convMask
-      } <- stacks.portA.response.get;
+      if (printDebug)
+        $display(fshow("Join: ") + fshow(warp) + fshow(StackEnt{next: next, divMask: divMask, convMask: convMask, ipdom: ipdom}));
       let nextDivMask = divMask & ~mask;
       let nextConvMask = convMask | mask;
+      let ent = StackEnt {next: next, divMask: nextDivMask, convMask: nextConvMask, ipdom: convMask == 0 ? pc : ipdom};
+      stacks.portB.request.put(BRAMRequest {
+        write: True, address: {wid, ptr}, datain: ent, responseOnWrite: False
+      });
       if (nextDivMask == 0) begin
-        stackAlloc[wid] <= allocMask | (1 << ptr);
-        let joined = Warp {wid: wid, pc: pc, mask: nextConvMask};
-        resps.iport[2].put(SchedResp{warp: joined, write: True, top: zeroExtend(pack(next))});
-      end else begin
-        let ent = StackEnt {next: next, divMask: nextDivMask, convMask: nextConvMask};
-        stacks.portB.request.put(BRAMRequest {
-          write: True, address: {wid, ptr}, datain: ent, responseOnWrite: False
-        });
+        if (pc == ipdom) begin
+          stackAlloc[wid] <= allocMask | (1 << ptr);
+          warp.mask = nextConvMask;
+          resps.iport[2].put(SchedResp{warp: warp, write: True, top: zeroExtend(pack(next))});
+        end else begin
+          resps.iport[2].put(SchedResp{warp: warp, write: False, top: ?});
+        end
       end
     end else begin
       resps.iport[2].put(SchedResp{warp: warp, write: False, top: 0});
@@ -277,7 +281,8 @@ module mkScheduler(Scheduler);
   endrule
 
   method Action putSchedReq(SchedReq req) if (stackInit);
-    $display(fshow(req));
+    if (printDebug)
+      $display(fshow(req));
     match SchedReq {warp: .warp, f: .f, v1: .v1, v2: .v2} = req;
     Bit#(ThreadNum) predMask = warp.mask & truncate(v1);
     Bit#(ThreadNum) restoreMask = truncate(v2);
@@ -295,10 +300,10 @@ module mkScheduler(Scheduler);
       fnWSPAWN: wspawnReqs.enq(wspawnReq);
       fnSPLIT: splitReqs.enq(splitReq);
       fnJOIN: begin
-        if (top matches tagged Valid .ptr)
-          stacks.portA.request.put(BRAMRequest {
-            write: False, address: {warp.wid, ptr}, datain: ?, responseOnWrite: False
-          });
+        let ptr = fromMaybe(?, top);
+        stacks.portA.request.put(BRAMRequest {
+          write: False, address: {warp.wid, ptr}, datain: ?, responseOnWrite: False
+        });
         joinReqs.enq(joinReq);
       end
       fnBAR: begin
@@ -314,9 +319,6 @@ module mkScheduler(Scheduler);
   method Action getDone = done.deq;
 
   method ActionValue#(SchedResp) getSchedResp;
-`ifdef SIMULATION
-    // doReport[1] <= True;
-`endif
     let resp = resps.first;
     resps.deq;
     return resp;
