@@ -1,10 +1,7 @@
 import Fifo::*;
 import FIFOF::*;
 import Vector::*;
-
-function UInt#(TLog#(w)) countLeadingZeroes(Bit#(w) in) =
-  // if Invalid, there must be 2ʷ zeroes, which does not fit
-  fromMaybe(?, findIndex(id, reverse(unpack(in))));
+import Count::*;
 
 typedef 16 MulWidth;
 typedef TAdd#(MulWidth, MulWidth) AddWidth;
@@ -286,7 +283,7 @@ function DivRes#(n) divStep(DivRes#(n) x);
   let vn = valueOf(n);
 
   match DivRes {qneg: .qneg, rneg: .rneg, dExp: .dExp, quot: .quot, den: .den, rem: .rem} = x;
-  let rExp = countLeadingZeroes(rem); // rem = 2 ^ (n - rExp) * 1.xxxx...
+  let rExp = countMSB(rem); // rem = 2 ^ (n - rExp) * 1.xxxx...
   let shamt = dExp - rExp;
   Bit#(n) quotShift = 1 << shamt;
   let denShift = den << shamt;
@@ -355,7 +352,7 @@ module mkDivider#(DivStep#(n) step) (Divider#(n));
     let rneg = nneg;
     let rem = nneg ? -num : num;
     let d = dneg ? ~den : den;
-    let dExp = countLeadingZeroes(d); // den = 2 ^ (n - dExp) * 1.xxxx...
+    let dExp = countMSB(d); // den = 2 ^ (n - dExp) * 1.xxxx...
     let dPow2 = dneg && (((-1) >> dExp) == d); // checks if d = -2ᵐ for some m
     dExp = dExp - (dPow2 ? 1 : 0);
     let den1 = d + (dneg ? 1 : 0);

@@ -264,8 +264,7 @@ module mkScoreboard(Scoreboard);
       match {.req, .cont} = ibuf[i].first;
       Bool rs1Pending = unpack(pending[i][pack(req.rs1)]);
       Bool rs2Pending = !req.conv && unpack(pending[i][pack(req.rs2)]);
-      Bit#(32) fpr = pending[i][63:32];
-      Bool rs3Pending = req.rs3.isFpr && unpack(fpr[req.rs3.idx]);
+      Bool rs3Pending = req.rs3.isFpr && unpack(pending[i][{1'b1, req.rs3.idx}]);
       Bool dstPending = unpack(pending[i][pack(cont.dst)]);
       //  if (ibuf[i].notEmpty && rs1Pending)
       //    $display("WID %d, rs1: %d locked", i, pack(req.rs1));
@@ -277,8 +276,7 @@ module mkScoreboard(Scoreboard);
       //    $display("WID %d, rd: %d locked", i, pack(cont.dst));
       isReady[i] = ibuf[i].notEmpty && !rs1Pending && !rs2Pending && !rs3Pending && !dstPending;
     end
-    let idx = fromMaybe(?, findIndex(id, isReady));
-    if (any(id, isReady)) begin
+    if (findIndex(id, isReady) matches tagged Valid .idx) begin
       out[0] <= tagged Valid ibuf[idx].first;
       ibuf[idx].deq;
     end

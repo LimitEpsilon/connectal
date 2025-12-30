@@ -36,6 +36,7 @@ import GetPut::*;
 import Divide::*;
 import SquareRoot::*;
 import FloatingPoint::*;
+import HardFloat::*;
 
 import "BDPI" function Float cpu_fma(Float x, Float y, Float z);
 function FloatingPoint#(e,m) canonicalNaN = FloatingPoint{sign: False, exp: '1, sfd: 1 << (valueof(m)-1)};
@@ -114,17 +115,39 @@ endmodule
 `ifndef NO_FDIV
 (* synthesize, gate_all_clocks *)
 module mkFloatDiv(Server#(Tuple3#(Float, Float, RoundMode), Tuple2#(Float, Exception)));
-    let int_div <- mkDivider(2);
-    let fpu <- mkFloatingPointDivider(int_div);
-    return fpu;
+  FIFOF#(void) dummy <- mkFIFOF;
+  interface Get response;
+    method ActionValue#(Tuple2#(Float, Exception)) get;
+      let x <- toGet(dummy).get;
+      return unpack(0);
+    endmethod
+  endinterface
+
+  interface Put request;
+    method Action put(Tuple3#(Float, Float, RoundMode) x) = dummy.enq(?);
+  endinterface
+//    let int_div <- mkDivider(2);
+//    let fpu <- mkFloatingPointDivider(int_div);
+//    return fpu;
 endmodule
 `endif
 `ifndef NO_FSQRT
 (* synthesize, gate_all_clocks *)
 module mkFloatSqrt(Server#(Tuple2#(Float, RoundMode), Tuple2#(Float, Exception)));
-    let int_sqrt <- mkSquareRooter(3);
-    let fpu <- mkFloatingPointSquareRooter(int_sqrt);
-    return fpu;
+  FIFOF#(void) dummy <- mkFIFOF;
+  interface Get response;
+    method ActionValue#(Tuple2#(Float, Exception)) get;
+      let x <- toGet(dummy).get;
+      return unpack(0);
+    endmethod
+  endinterface
+
+  interface Put request;
+    method Action put(Tuple2#(Float, RoundMode) x) = dummy.enq(?);
+  endinterface
+//    let int_sqrt <- mkSquareRooter(3);
+//    let fpu <- mkFloatingPointSquareRooter(int_sqrt);
+//    return fpu;
 endmodule
 `endif
 (* synthesize, gate_all_clocks *)
@@ -1024,139 +1047,145 @@ endmodule
 `endif
 
 (* noinline *)
-function FpuResult execVectorFpuSimple(FpuInst fpu_inst, RVRoundMode rm, Bit#(32) rv1, Bit#(32) rv2);
-    FpuResult fpu_result = FpuResult{data: 0, fflags: 0};
+function FpuResult execFloatSimple(FpuFunc fpu_f, Bit#(3) fpu_rm, Bit#(33) rv1, Bit#(33) rv2);
+    FpuResult fpu_result = ?;
 
-    // Convert the Risc-V RVRoundMode to FloatingPoint::RoundMode
-    RoundMode fpu_rm = (case (rm)
-            RNE:      Rnd_Nearest_Even;
-            RTZ:      Rnd_Zero;
-            RDN:      Rnd_Minus_Inf;
-            RUP:      Rnd_Plus_Inf;
-            RMM:      Rnd_Nearest_Away_Zero;
-            RDyn:     Rnd_Nearest_Even;
-            default:  Rnd_Nearest_Even;
-        endcase);
+    CompareRecFN#(8, 24) compareRecF32 = mkCompareRecFN;
+    ClassifyRecFN#(8, 24) classifyRecF32 = classifyRecFN;
+    function INToRecFN#(32, 8, 24) iN32ToRecF32(Bool signedOp) = mkINToRecFN(signedOp);
+    function RecFNToIN#(8, 24, 32) recF32ToIN32(Bool signedOp) = mkRecFNToIN(signedOp);
+    FNFromRecFN#(8, 24) recF32ToF32 = fNFromRecFN;
 
     // single precision
-    Bit#(64) rVal1 = extend(rv1);
-    Bit#(64) rVal2 = extend(rv2);
-    Float in1 = unpack(rv1);
-    Float in2 = unpack(rv2);
-    Float dst = unpack(0);
-    Maybe#(Bit#(64)) full_dst = Invalid;
+    Bit#(33) dst = ?;
     Exception e = unpack(0);
-    let fpu_f = fpu_inst.func;
+    Bool noUncode = case (fpu_f)
+        FEq, FLt, FLe, FClass: True;
+        // Float -> Bits
+        FMv_XF: True;
+        // Bits -> Float
+        FMv_FX: True;
+        // Float -> Int
+        FCvt_WF, FCvt_WUF: True;
+        default: False;
+    endcase;
+
+    match CompareRes {lt: .lt, eq: .eq, gt: .gt, fflags: Exception {invalid_op: .cmp_invalid}} = compareRecF32(rv1, rv2, False);
+    match {.int_res, .int_exc} = recF32ToIN32(fpu_f == FCvt_WF, rv1, fpu_rm);
+    match {.float_res, .float_exc} = iN32ToRecF32(fpu_f == FCvt_FW, truncate(rv1), fpu_rm, 0);
+
     // Fpu Decoding
     case (fpu_f)
         // combinational instructions
-        FMin:     begin
-            Bit#(64) x;
-            {x, e} = fmin_s(rVal1, rVal2);
-            full_dst = tagged Valid x;
+        FMin: begin
+            e.invalid_op = cmp_invalid;
+            dst = gt ? rv2 : rv1;
         end
-        FMax:     begin
-            Bit#(64) x;
-            {x, e} = fmax_s(rVal1, rVal2);
-            full_dst = tagged Valid x;
+        FMax: begin
+            e.invalid_op = cmp_invalid;
+            dst = lt ? rv2 : rv1;
         end
-        FEq:        dst = unpack(zeroExtend(pack(compareFP(in1, in2) == EQ)));
-        FLt:        begin
-            dst = unpack(zeroExtend(pack(compareFP(in1, in2) == LT)));
-            if (isNaN(in1) || isNaN(in2)) begin
-                e.invalid_op = True;
-            end
+        FEq: begin
+            e.invalid_op = cmp_invalid;
+            dst = zeroExtend(pack(eq));
         end
-        FLe:        begin
-            dst = unpack(zeroExtend(pack((compareFP(in1, in2) == LT) || (compareFP(in1, in2) == EQ))));
-            if (isNaN(in1) || isNaN(in2)) begin
-                e.invalid_op = True;
-            end
+        FLt: begin
+            e.invalid_op = cmp_invalid;
+            dst = zeroExtend(pack(lt));
+        end
+        FLe: begin
+            e.invalid_op = cmp_invalid;
+            dst = zeroExtend(pack(lt || eq));
         end
         // CLASS functions
-        FClass: begin
-            Bool exp_0s = (in1.exp == 0);
-            Bool exp_1s = (in1.exp == '1);
-            Bool sfd_0s = (in1.sfd == 0);
-            Bit#(10) res = 0;
-            res[0] = pack(in1.sign && exp_1s && sfd_0s);                // -inf
-            res[1] = pack(in1.sign && !exp_1s && !exp_0s);              // -normal
-            res[2] = pack(in1.sign && exp_0s && !sfd_0s);               // -subnormal
-            res[3] = pack(in1.sign && exp_0s && sfd_0s);                // -0
-            res[4] = pack(!in1.sign && exp_0s && sfd_0s);               // +0
-            res[5] = pack(!in1.sign && exp_0s && !sfd_0s);              // +subnormal
-            res[6] = pack(!in1.sign && !exp_1s && !exp_0s);             // +normal
-            res[7] = pack(!in1.sign && exp_1s && sfd_0s);               // -inf
-            res[8] = pack(exp_1s && !sfd_0s && (msb(in1.sfd) == 0));    // signaling NaN
-            res[9] = pack(exp_1s && !sfd_0s && (msb(in1.sfd) == 1));    // quiet NaN
-            full_dst = tagged Valid zeroExtend(res);
-        end
+        FClass: dst = zeroExtend(classifyRecF32(rv1));
         // Sign Injection
-        FSgnj:    begin
-            dst = in1;
-            dst.sign = in2.sign;
+        FSgnj: begin
+            dst = rv1;
+            dst[32] = rv2[32];
         end
         FSgnjn: begin
-            dst = in1;
-            dst.sign = !in2.sign;
+            dst = rv1;
+            dst[32] = ~rv2[32];
         end
         FSgnjx: begin
-            dst = in1;
-            dst.sign = unpack(pack(in1.sign) ^ pack(in2.sign));
+            dst = rv1;
+            dst[32] = rv1[32] ^ rv2[32];
         end
         // Float -> Bits
-        FMv_XF:     full_dst = tagged Valid signExtend(pack(in1));
+        FMv_XF: dst = rv1;
         // Bits -> Float
-        FMv_FX:     full_dst = tagged Valid zeroExtend(pack(in1));
-        // Float -> Float
-        FCvt_FF:    begin
-            Double in1_double = unpack(rVal1);
-            {dst, e} = fcvt_s_d(in1_double, fpu_rm);
-            if (isNaN(dst)) dst = canonicalNaN;
-        end
+        FMv_FX: dst = rv1;
         // Float -> Int
-        FCvt_WF:    begin
-            Bit#(64) dst_bits;
-            {dst_bits, e} = fcvt_w_f(in1, fpu_rm);
-            full_dst = tagged Valid dst_bits;
+        FCvt_WF: begin
+            dst = zeroExtend(int_res);
+            e.invalid_op = unpack(int_exc[2]);
+            e.overflow = unpack(int_exc[1]);
+            e.inexact = unpack(int_exc[0]);
         end
         FCvt_WUF: begin
-            Bit#(64) dst_bits;
-            {dst_bits, e} = fcvt_wu_f(in1, fpu_rm);
-            full_dst = tagged Valid dst_bits;
-        end
-        FCvt_LF:    begin
-            Bit#(64) dst_bits;
-            {dst_bits, e} = fcvt_l_f(in1, fpu_rm);
-            full_dst = tagged Valid dst_bits;
-        end
-        FCvt_LUF: begin
-            Bit#(64) dst_bits;
-            {dst_bits, e} = fcvt_lu_f(in1, fpu_rm);
-            full_dst = tagged Valid dst_bits;
+            dst = zeroExtend(int_res);
+            e.invalid_op = unpack(int_exc[2]);
+            e.overflow = unpack(int_exc[1]);
+            e.inexact = unpack(int_exc[0]);
         end
         // Int -> Float
         FCvt_FW: begin
-            {dst, e} = fcvt_f_w(rVal1, fpu_rm);
-            if (isNaN(dst)) dst = canonicalNaN;
+            dst = float_res;
+            e = float_exc;
         end
         FCvt_FWU: begin
-            {dst, e} = fcvt_f_wu(rVal1, fpu_rm);
-            if (isNaN(dst)) dst = canonicalNaN;
-        end
-        FCvt_FL: begin
-            {dst, e} = fcvt_f_l(rVal1, fpu_rm);
-            if (isNaN(dst)) dst = canonicalNaN;
-        end
-        FCvt_FLU: begin
-            {dst, e} = fcvt_f_lu(rVal1, fpu_rm);
-            if (isNaN(dst)) dst = canonicalNaN;
+            dst = float_res;
+            e = float_exc;
         end
     endcase
-    fpu_result.data = (full_dst matches tagged Valid .data ? data : zeroExtend(pack(dst)));
+    Bit#(32) data = noUncode ? truncate(dst) : recF32ToF32(dst);
+    fpu_result.data = zeroExtend(data);
     fpu_result.fflags = pack(e);
     return fpu_result;
 endfunction
+
+(* synthesize *)
+module mkFloatSimple (Server#(Tuple4#(FpuFunc, RVRoundMode, Bit#(32), Bit#(32)), FpuResult));
+  FIFOF#(Tuple4#(FpuFunc, Bit#(3), Bit#(33), Bit#(33))) fpu_arg_fifo <- mkFIFOF;
+  FIFOF#(FpuResult) fpu_exec_fifo <- mkFIFOF;
+  RecFNFromFN#(8, 24) f32ToRecF32 = recFNFromFN;
+
+  (* fire_when_enabled *)
+  rule exec_simple;
+    match {.fpu_f, .fpu_rm, .rVal1, .rVal2} <- toGet(fpu_arg_fifo).get;
+    fpu_exec_fifo.enq(execFloatSimple(fpu_f, fpu_rm, rVal1, rVal2));
+  endrule
+
+  interface Put request;
+    method Action put(Tuple4#(FpuFunc, RVRoundMode, Bit#(32), Bit#(32)) in);
+      match {.fpu_f, .rm, .rVal1, .rVal2} = in;
+
+      Bit#(3) fpu_rm = case (rm)
+        RNE:     round_near_even;
+        RTZ:     round_minMag;
+        RDN:     round_min;
+        RUP:     round_max;
+        RMM:     round_near_maxMag;
+        default: round_near_even;
+      endcase;
+      Bool noRecode = case (fpu_f)
+        // Float -> Bits
+        FMv_XF: True;
+        // Bits -> Float
+        FMv_FX: True;
+        // Int -> Float
+        FCvt_FW, FCvt_FWU: True;
+        default: False;
+      endcase;
+
+      Bit#(33) rv1 = noRecode ? zeroExtend(rVal1) : (f32ToRecF32(rVal1));
+      Bit#(33) rv2 = noRecode ? zeroExtend(rVal2) : (f32ToRecF32(rVal2));
+      fpu_arg_fifo.enq(tuple4(fpu_f, fpu_rm, rv1, rv2));
+    endmethod
+  endinterface
+  interface Get response = toGet(fpu_exec_fifo);
+endmodule
 
 typedef struct {
   FpuFunc f;
@@ -1165,6 +1194,9 @@ typedef struct {
   Vector#(n, Bit#(32)) v3;
 } FpuReq#(numeric type n) deriving (Bits, Eq, FShow);
 
+function
+  Module#(Vector#(ThreadNum, Server#(Tuple4#(FpuFunc, RVRoundMode, Bit#(32), Bit#(32)), FpuResult)))
+  mkVectorFloatSimple = replicateM(mkFloatSimple);
 function
   Module#(Vector#(ThreadNum, Server#(Tuple3#(Float, Float, RoundMode), Tuple2#(Float, Exception))))
   mkVectorFloatAdd = replicateM(mkFloatAdd);
@@ -1191,12 +1223,6 @@ interface VectorFpu;
 endinterface
 
 (* synthesize *)
-module mkFpuExecFifo(Fifo#(8, Vector#(ThreadNum, FpuResult)));
-  let m <- mkBRAMFifo(True, True);
-  return m;
-endmodule
-
-(* synthesize *)
 module mkFpuExecFifoOut(Fifo#(8, Vector#(ThreadNum, FpuResult)));
   let m <- mkBRAMFifo(True, True);
   return m;
@@ -1204,12 +1230,12 @@ endmodule
 
 (* synthesize *)
 module mkVectorFpu(VectorFpu);
-    Fifo#(8, Vector#(ThreadNum, FpuResult)) fpu_exec_fifo <- mkFpuExecFifo; // in parallel with pipelined FPUs
     Fifo#(8, FpuFunc) fpu_func_fifo <- mkCFFifo(True, True); // in parallel with pipelined FPUs
     Fifo#(8, Vector#(ThreadNum, FpuResult)) fpu_exec_fifo_out <- mkFpuExecFifoOut; // all pipelined FPUs dequeue into this
 
     // Pipelined units
     // Float
+    let float_simple <- mkVectorFloatSimple;
     let float_add <- mkVectorFloatAdd;
     let float_mult <- mkVectorFloatMult;
     let float_div <- mkVectorFloatDiv;
@@ -1217,20 +1243,10 @@ module mkVectorFpu(VectorFpu);
     let float_fma <- mkVectorFloatFMA;
 
     rule finish;
-        Vector#(ThreadNum, FpuResult) x = fpu_exec_fifo.first;
         let fpu_f = fpu_func_fifo.first;
-        fpu_exec_fifo.deq;
         fpu_func_fifo.deq;
 
-        Bool pipeline_result =
-          case (fpu_f)
-            // pipeline instructions
-            FAdd, FSub, FMul, FDiv, FSqrt, FMAdd, FMSub, FNMSub, FNMAdd: True;
-            default: False;
-          endcase;
-
-        Vector#(ThreadNum, Float) outs;
-        Vector#(ThreadNum, Exception) excs;
+        Vector#(ThreadNum, FpuResult) exec_out;
         // Fpu Decoding
         for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1) begin
             Float out = unpack(0);
@@ -1246,19 +1262,15 @@ module mkVectorFpu(VectorFpu);
                 FMSub:  begin {out, exc} <- float_fma[i].response.get; end
                 FNMSub: begin {out, exc} <- float_fma[i].response.get; out = -out; end
                 FNMAdd: begin {out, exc} <- float_fma[i].response.get; out = -out; end
+                default: begin let x <- float_simple[i].response.get; out = unpack(truncate(x.data)); exc = unpack(x.fflags); end
             endcase
-            outs[i] = out;
-            excs[i] = exc;
+            // canonicalize NaNs
+            if (isNaN(out)) out = canonicalNaN;
+            // update data and exception in exec_out
+            exec_out[i].data = zeroExtend(pack(out));
+            exec_out[i].fflags = pack(exc);
         end
-        if (pipeline_result)
-            for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1) begin
-                // canonicalize NaNs
-                if (isNaN(outs[i])) outs[i] = canonicalNaN;
-                // update data and exception in x
-                x[i].data = zeroExtend(pack(outs[i]));
-                x[i].fflags = pack(excs[i]);
-            end
-        fpu_exec_fifo_out.enq(x);
+        fpu_exec_fifo_out.enq(exec_out);
     endrule
 
     method Action exec(FpuFunc fpu_f, RVRoundMode rm, Vector#(ThreadNum, Bit#(32)) rVal1, Vector#(ThreadNum, Bit#(32)) rVal2, Vector#(ThreadNum, Bit#(32)) rVal3);
@@ -1272,12 +1284,6 @@ module mkVectorFpu(VectorFpu);
                 RDyn:       Rnd_Nearest_Even;
                 default:    Rnd_Nearest_Even;
             endcase);
-
-        let fpu_inst = FpuInst {func: fpu_f, precision: Single};
-        Vector#(ThreadNum, FpuResult) fpu_result;
-        for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1) begin
-            fpu_result[i] = execVectorFpuSimple(fpu_inst, rm, rVal1[i], rVal2[i]);
-        end
 
         // single precision
         // Fpu Decoding
@@ -1296,9 +1302,9 @@ module mkVectorFpu(VectorFpu);
                 FMSub:  float_fma[i].request.put(tuple4(tagged Valid (-in3), in1, in2, fpu_rm));
                 FNMSub: float_fma[i].request.put(tuple4(tagged Valid (-in3), in1, in2, fpu_rm));
                 FNMAdd: float_fma[i].request.put(tuple4(tagged Valid in3, in1, in2, fpu_rm));
+                default: float_simple[i].request.put(tuple4(fpu_f, rm, rVal1[i], rVal2[i]));
             endcase
         end
-        fpu_exec_fifo.enq(fpu_result);
         fpu_func_fifo.enq(fpu_f);
     endmethod
 

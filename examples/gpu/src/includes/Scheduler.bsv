@@ -6,6 +6,7 @@ import GetPut::*;
 import MergeTree::*;
 import BRAM::*;
 import BypassBRAM::*;
+import Count::*;
 
 typedef TDiv#(WarpNum, 2) BarNum; // at least 2 warps need to converge on a barrier
 typedef TLog#(BarNum) LogBarNum;
@@ -130,22 +131,20 @@ module mkScheduler(Scheduler);
   // WSPAWN
   (* fire_when_enabled *)
   rule do_wspawn(upperCurSpawn != 0);
-    let evenWid = findIndex(id, unpack(widAlloc[0]));
-    let oddWid = findIndex(id, unpack(widAlloc[1]));
-    let ewid = fromMaybe(?, evenWid);
-    let owid = fromMaybe(?, oddWid);
+    let evenWid = countLSB(widAlloc[0]);
+    let oddWid = countLSB(widAlloc[1]);
     match WspawnReq {warp: .warp, count: .count, pc: .pc} = curSpawn;
     let nextCurSpawn = WspawnReq {warp: warp, count: count - 1, pc: pc};
     if (widCount[1] < widCount[0]) begin // allocate odd wid
       widCount[1] <= widCount[1] + 1;
-      widAlloc[1] <= widAlloc[1] & ~(1 << owid);
-      let newWarp = Warp {mask: 1, wid: {pack(owid), 1'b1}, pc: pc};
+      widAlloc[1] <= widAlloc[1] & ~(1 << oddWid);
+      let newWarp = Warp {mask: 1, wid: {pack(oddWid), 1'b1}, pc: pc};
       resps.iport[1].put(SchedResp {warp: newWarp, write: True, top: 0});
       curSpawn <= nextCurSpawn;
-    end else if (isValid(evenWid)) begin // allocate even wid
+    end else if (widAlloc[0] != 0) begin // allocate even wid
       widCount[0] <= widCount[0] + 1;
-      widAlloc[0] <= widAlloc[0] & ~(1 << ewid);
-      let newWarp = Warp {mask: 1, wid: {pack(ewid), 1'b0}, pc: pc};
+      widAlloc[0] <= widAlloc[0] & ~(1 << evenWid);
+      let newWarp = Warp {mask: 1, wid: {pack(evenWid), 1'b0}, pc: pc};
       resps.iport[1].put(SchedResp {warp: newWarp, write: True, top: 0});
       curSpawn <= nextCurSpawn;
     end // else, no free warps
@@ -182,7 +181,7 @@ module mkScheduler(Scheduler);
     match SplitReq {warp: .warp, predMask: .predMask, top: .top} = splitReqs.first;
     match Warp {wid: .wid, pc: .pc, mask: .mask} = warp;
     let allocMask = stackAlloc[wid];
-    let ptr = pack(fromMaybe(?, findIndex(id, unpack(allocMask)))); // never fails
+    let ptr = pack(countLSB(allocMask)); // never fails
     Bool isDivergent = (predMask != 0) && (predMask != mask);
     if (isDivergent) begin // allocate new entry
       let ent = StackEnt{next: top, divMask: mask, convMask: 0, ipdom: ?};
@@ -257,11 +256,12 @@ module mkScheduler(Scheduler);
 
   (* fire_when_enabled *)
   rule preload_barDoneIdx(!barReqs.notEmpty && !barDoneIdxValid);
-    if (findIndex(id, unpack(barDone)) matches tagged Valid .b) begin
+    let b = pack(countLSB(barDone));
+    if (barDone != 0) begin
       barMasks.portB.request.put(BRAMRequest{
-        write: False, address: pack(b), datain: ?, responseOnWrite: False
+        write: False, address: b, datain: ?, responseOnWrite: False
       });
-      barDoneIdx <= pack(b);
+      barDoneIdx <= b;
       barDoneIdxValid <= True;
     end
   endrule
