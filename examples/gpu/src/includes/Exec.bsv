@@ -55,7 +55,6 @@ function Bool bru(Data a, Data b, BrFunc brFunc);
     Ltu : (a < b);
     Ge  : signedGE(a, b);
     Geu : (a >= b);
-    AT  : True;
     NT  : False;
   endcase;
   return brTaken;

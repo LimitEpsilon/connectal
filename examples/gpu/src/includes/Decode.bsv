@@ -139,20 +139,6 @@ function DecodedInst decode(RawInst inst);
     endcase :
     Add;
 
-  CsrFunc csrFunc = funct3 == fnCSRRW ? Csrw : Csrr;
-
-  MFunc mFunc = unpack(funct3);
-
-  let brFunc = case (funct3)
-    fnBEQ:   Eq;
-    fnBNE:   Neq;
-    fnBLT:   Lt;
-    fnBLTU:  Ltu;
-    fnBGE:   Ge;
-    fnBGEU:  Geu;
-    default: NT;
-  endcase;
-
   let fpuFunc = opcode[2] == opFMAdd[2] ? getFmaFunc(opcode) : getFpuFunc(funct7, rs2[0], funct3);
 
   // split/join are the only instructions with funct3 = x1x among the scheduling instructions
@@ -190,10 +176,8 @@ function DecodedInst decode(RawInst inst);
   let dInst = DecodedInst {
     iType: iType,
     aluFunc: aluFunc,
-    mFunc: mFunc,
-    brFunc: brFunc, // only used by branch instructions
-    csrFunc: csrFunc,
     fpuFunc: fpuFunc,
+    funct3: funct3,
     conv: conv,
     predN: rd != 0 && rs2 != 0, // if pred, rs2 != 0. if split, rd != 0
     dst: RIndx {isFpr: dstFp, idx: dstValid ? rd : 0},

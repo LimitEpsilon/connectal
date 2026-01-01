@@ -309,14 +309,13 @@ typedef enum {
 } IType deriving(Bits, Eq, FShow);
 
 typedef enum {
-  Eq,
-  Neq,
-  AT,
+  Eq  = 3'b000, // fnBEQ
+  Neq = 3'b001, // fnBNE
   NT,
-  Lt,
-  Ge,
-  Ltu,
-  Geu
+  Lt  = 3'b100, // fnBLT
+  Ltu = 3'b110, // fnBLTU
+  Ge  = 3'b101, // fnBGE
+  Geu = 3'b111  // fnBGEU
 } BrFunc deriving(Bits, Eq, FShow);
 
 typedef enum {
@@ -335,15 +334,15 @@ typedef enum {
 } AluFunc deriving(Bits, Eq, FShow);
 
 typedef enum {
-  Csrr,
-  Csrw
+  Csrw = 3'b001, // fnCSRRW
+  Csrr = 3'b010  // fnCSRRS
 } CsrFunc deriving(Bits, Eq, FShow);
 
 // has the same bit representation as funct3
 // in the case that the representation changes, only change the order between Mult and Divide
-typedef union tagged {
-  Bit#(2) Mult; // lower two bits of funct3
-  Bit#(2) Divide; // lower two bits of funct3
+typedef struct {
+  Bool    isDiv;
+  Bit#(2) mOp; // lower two bits of funct3
 } MFunc deriving(Bits, Eq, FShow);
 
 // has the same bit representation as {funct3[2], funct3[0]}
@@ -358,9 +357,7 @@ typedef struct {
   IType    iType;
   AluFunc  aluFunc;
   FpuFunc  fpuFunc;
-  MFunc    mFunc;
-  BrFunc   brFunc;
-  CsrFunc  csrFunc;
+  Bit#(3)  funct3;
   Bool     conv; // split or join
   Bool     predN;
   RIndx    dst;
@@ -385,9 +382,7 @@ typedef struct {
   IType    iType;
   AluFunc  aluFunc;
   FpuFunc  fpuFunc;
-  MFunc    mFunc;
-  BrFunc   brFunc;
-  CsrFunc  csrFunc;
+  Bit#(3)  funct3;
   Bool     predN; // rd != 0
   RIndx    dst;
   CSR      csr;
