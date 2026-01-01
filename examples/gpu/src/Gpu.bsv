@@ -238,10 +238,8 @@ module mkCore(Core);
     match DecodedInst {
       iType: .iType,
       aluFunc: .aluFunc,
-      mFunc: .mFunc,
-      brFunc: .brFunc,
-      csrFunc: .csrFunc,
       fpuFunc: .fpuFunc,
+      funct3: .funct3,
       conv: .conv,
       predN: .predN,
       dst: .dst,
@@ -268,10 +266,8 @@ module mkCore(Core);
       takenPc: takenPc,
       iType: iType,
       aluFunc: aluFunc,
-      mFunc: mFunc,
-      brFunc: brFunc,
-      csrFunc: csrFunc,
       fpuFunc: fpuFunc,
+      funct3: funct3,
       predN: predN,
       immValid: immValid,
       imm: imm,
@@ -338,10 +334,8 @@ module mkCore(Core);
         takenPc: .takenPc,
         iType: .iType,
         aluFunc: .aluFunc,
-        mFunc: .mFunc,
-        brFunc: .brFunc,
-        csrFunc: .csrFunc,
         fpuFunc: .fpuFunc,
+        funct3: .funct3,
         predN: .predN,
         immValid: .immValid,
         imm: .imm,
@@ -350,7 +344,8 @@ module mkCore(Core);
       } = rfOut[i].first;
       match RFResp {rv1: .rv1, rv2: .rv2, rv3: .rv3} <- rfs[i].ans;
 
-      Bit#(3) funct3 = pack(mFunc);
+      CsrFunc csrFunc = unpack(truncate(funct3));
+      MFunc mFunc = unpack(funct3);
       Bool isMask = unpack(~funct3[1]);
       MemMask memMask = unpack({funct3[2], funct3[0]});
 
@@ -374,7 +369,7 @@ module mkCore(Core);
         v2: immValid ? replicate(imm) : rv2
       };
       EXCont exCont = EXCont {warp: warp, iType: iType, isMask: isMask, memMask: memMask, dst: dst};
-      BruReq#(ThreadNum) brReq = BruReq {f: brFunc, v1: rv1, v2: rv2};
+      BruReq#(ThreadNum) brReq = BruReq {f: unpack(funct3), v1: rv1, v2: rv2};
       BRCont brCont = BRCont {warp: warp, takenPc: takenPc};
       CsrReq#(ThreadNum) csrReq = CsrReq {wid: warp.wid, mask: warp.mask, csr: csr, write: csrFunc == Csrw, data: rs1};
       SimpleEXCont simpleCont = SimpleEXCont {warp: warp, dst: dst};
@@ -383,16 +378,14 @@ module mkCore(Core);
       case (iType)
         Alu, Ld, Jr: exIn.iport[i].put(tuple2(exReq, exCont));
         Sched: schedIn.iport[i].put(schedReq);
-        MulDiv: case (mFunc) matches
-          tagged Mult .f: begin
-            MulReq#(ThreadNum) mulReq = MulReq{f: f, v1: rv1, v2: rv2};
+        MulDiv :
+          if (mFunc.isDiv) begin
+            DivReq#(ThreadNum) divReq = DivReq{f: mFunc.mOp, v1: rv1, v2: rv2};
+            divIn.iport[i].put(tuple2(divReq, simpleCont));
+          end else begin
+            MulReq#(ThreadNum) mulReq = MulReq{f: mFunc.mOp, v1: rv1, v2: rv2};
             mulIn.iport[i].put(tuple2(mulReq, simpleCont));
           end
-          tagged Divide .f: begin
-            DivReq#(ThreadNum) divReq = DivReq{f: f, v1: rv1, v2: rv2};
-            divIn.iport[i].put(tuple2(divReq, simpleCont));
-          end
-        endcase
         St: begin
           exIn.iport[i].put(tuple2(exReq, exCont));
           stData[i].enq(rv2);
