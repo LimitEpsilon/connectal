@@ -685,16 +685,16 @@ function FpuResult execFpuSimple(FpuInst fpu_inst, RVRoundMode rm, Bit#(64) rVal
                 {dst_bits, e} = fcvt_wu_f(in1, fpu_rm);
                 full_dst = tagged Valid dst_bits;
             end
-            FCvt_LF:    begin
-                Bit#(64) dst_bits;
-                {dst_bits, e} = fcvt_l_f(in1, fpu_rm);
-                full_dst = tagged Valid dst_bits;
-            end
-            FCvt_LUF: begin
-                Bit#(64) dst_bits;
-                {dst_bits, e} = fcvt_lu_f(in1, fpu_rm);
-                full_dst = tagged Valid dst_bits;
-            end
+//            FCvt_LF:    begin
+//                Bit#(64) dst_bits;
+//                {dst_bits, e} = fcvt_l_f(in1, fpu_rm);
+//                full_dst = tagged Valid dst_bits;
+//            end
+//            FCvt_LUF: begin
+//                Bit#(64) dst_bits;
+//                {dst_bits, e} = fcvt_lu_f(in1, fpu_rm);
+//                full_dst = tagged Valid dst_bits;
+//            end
             // Int -> Float
             FCvt_FW: begin
                 {dst, e} = fcvt_f_w(rVal1, fpu_rm);
@@ -704,14 +704,14 @@ function FpuResult execFpuSimple(FpuInst fpu_inst, RVRoundMode rm, Bit#(64) rVal
                 {dst, e} = fcvt_f_wu(rVal1, fpu_rm);
                 if (isNaN(dst)) dst = canonicalNaN;
             end
-            FCvt_FL: begin
-                {dst, e} = fcvt_f_l(rVal1, fpu_rm);
-                if (isNaN(dst)) dst = canonicalNaN;
-            end
-            FCvt_FLU: begin
-                {dst, e} = fcvt_f_lu(rVal1, fpu_rm);
-                if (isNaN(dst)) dst = canonicalNaN;
-            end
+//            FCvt_FL: begin
+//                {dst, e} = fcvt_f_l(rVal1, fpu_rm);
+//                if (isNaN(dst)) dst = canonicalNaN;
+//            end
+//            FCvt_FLU: begin
+//                {dst, e} = fcvt_f_lu(rVal1, fpu_rm);
+//                if (isNaN(dst)) dst = canonicalNaN;
+//            end
         endcase
         fpu_result.data = (full_dst matches tagged Valid .data ? data : zeroExtend(pack(dst)));
         fpu_result.fflags = pack(e);
@@ -801,16 +801,16 @@ function FpuResult execFpuSimple(FpuInst fpu_inst, RVRoundMode rm, Bit#(64) rVal
                 {dst_bits, e} = fcvt_wu_f(in1, fpu_rm);
                 full_dst = tagged Valid dst_bits;
             end
-            FCvt_LF:    begin
-                Bit#(64) dst_bits;
-                {dst_bits, e} = fcvt_l_f(in1, fpu_rm);
-                full_dst = tagged Valid dst_bits;
-            end
-            FCvt_LUF: begin
-                Bit#(64) dst_bits;
-                {dst_bits, e} = fcvt_lu_f(in1, fpu_rm);
-                full_dst = tagged Valid dst_bits;
-            end
+//            FCvt_LF:    begin
+//                Bit#(64) dst_bits;
+//                {dst_bits, e} = fcvt_l_f(in1, fpu_rm);
+//                full_dst = tagged Valid dst_bits;
+//            end
+//            FCvt_LUF: begin
+//                Bit#(64) dst_bits;
+//                {dst_bits, e} = fcvt_lu_f(in1, fpu_rm);
+//                full_dst = tagged Valid dst_bits;
+//            end
             // Int -> Float
             FCvt_FW: begin
                 {dst, e} = fcvt_f_w(rVal1, fpu_rm);
@@ -820,14 +820,14 @@ function FpuResult execFpuSimple(FpuInst fpu_inst, RVRoundMode rm, Bit#(64) rVal
                 {dst, e} = fcvt_f_wu(rVal1, fpu_rm);
                 if (isNaN(dst)) dst = canonicalNaN;
             end
-            FCvt_FL: begin
-                {dst, e} = fcvt_f_l(rVal1, fpu_rm);
-                if (isNaN(dst)) dst = canonicalNaN;
-            end
-            FCvt_FLU: begin
-                {dst, e} = fcvt_f_lu(rVal1, fpu_rm);
-                if (isNaN(dst)) dst = canonicalNaN;
-            end
+//            FCvt_FL: begin
+//                {dst, e} = fcvt_f_l(rVal1, fpu_rm);
+//                if (isNaN(dst)) dst = canonicalNaN;
+//            end
+//            FCvt_FLU: begin
+//                {dst, e} = fcvt_f_lu(rVal1, fpu_rm);
+//                if (isNaN(dst)) dst = canonicalNaN;
+//            end
         endcase
         fpu_result.data = (full_dst matches tagged Valid .data ? data : pack(dst));
         fpu_result.fflags = pack(e);
@@ -1077,64 +1077,37 @@ function FpuResult execFloatSimple(FpuFunc fpu_f, Bit#(3) fpu_rm, Bit#(33) rv1, 
     // Fpu Decoding
     case (fpu_f)
         // combinational instructions
-        FMin: begin
+        FMin, FMax: begin
             e.invalid_op = cmp_invalid;
-            dst = gt ? rv2 : rv1;
+            let sel = unpack(pack(fpu_f)[1]) ? lt : gt;
+            dst = sel ? rv2 : rv1;
         end
-        FMax: begin
+        FEq, FLt, FLe: begin
             e.invalid_op = cmp_invalid;
-            dst = lt ? rv2 : rv1;
-        end
-        FEq: begin
-            e.invalid_op = cmp_invalid;
-            dst = zeroExtend(pack(eq));
-        end
-        FLt: begin
-            e.invalid_op = cmp_invalid;
-            dst = zeroExtend(pack(lt));
-        end
-        FLe: begin
-            e.invalid_op = cmp_invalid;
-            dst = zeroExtend(pack(lt || eq));
+            dst = zeroExtend(~pack(fpu_f)[0] & pack(eq) | ~pack(fpu_f)[1] & pack(lt));
         end
         // CLASS functions
         FClass: dst = zeroExtend(classifyRecF32(rv1));
         // Sign Injection
-        FSgnj: begin
+        FSgnj, FSgnjn, FSgnjx: begin
             dst = rv1;
-            dst[32] = rv2[32];
+            let x =
+              unpack(pack(fpu_f)[1]) ? // FSgnjn
+              1'b1 :
+              pack(fpu_f)[3] & rv1[32]; // fpu_f[3] == 1 → FSgnjx
+            dst[32] = x ^ rv2[32];
         end
-        FSgnjn: begin
-            dst = rv1;
-            dst[32] = ~rv2[32];
-        end
-        FSgnjx: begin
-            dst = rv1;
-            dst[32] = rv1[32] ^ rv2[32];
-        end
-        // Float -> Bits
-        FMv_XF: dst = rv1;
-        // Bits -> Float
-        FMv_FX: dst = rv1;
-        // Float -> Int
-        FCvt_WF: begin
+        // Float → Bits, Bits → Float
+        FMv_XF, FMv_FX: dst = rv1;
+        // Float → Int
+        FCvt_WF, FCvt_WUF: begin
             dst = zeroExtend(int_res);
             e.invalid_op = unpack(int_exc[2]);
             e.overflow = unpack(int_exc[1]);
             e.inexact = unpack(int_exc[0]);
         end
-        FCvt_WUF: begin
-            dst = zeroExtend(int_res);
-            e.invalid_op = unpack(int_exc[2]);
-            e.overflow = unpack(int_exc[1]);
-            e.inexact = unpack(int_exc[0]);
-        end
-        // Int -> Float
-        FCvt_FW: begin
-            dst = float_res;
-            e = float_exc;
-        end
-        FCvt_FWU: begin
+        // Int → Float
+        FCvt_FW, FCvt_FWU: begin
             dst = float_res;
             e = float_exc;
         end

@@ -18,58 +18,15 @@ import Types::*;
 import ProcTypes::*;
 import Vector::*;
 
-function FpuFunc getFmaFunc(Opcode op) =
-  case (op[1:0])
-    2'b00: FMAdd;
-    2'b01: FMSub;
-    2'b10: FNMSub;
-    2'b11: FNMAdd;
-  endcase;
+function FpuFunc getFmaFunc(Opcode op) = unpack(op);
 
-function FpuFunc getFpuFunc(Bit#(7) funct7, Bit#(1) rs2, Bit#(3) funct3) =
-  case (funct7)
-    f7_FADD_S:  FAdd;
-    f7_FSUB_S:  FSub;
-    f7_FMUL_S:  FMul;
-    f7_FDIV_S:  FDiv;
-    f7_FSQRT_S: FSqrt;
-    f7_FSGNJ_S:
-      case (funct3[1:0])
-        2'b00: FSgnj;
-        2'b01: FSgnjn;
-        2'b10: FSgnjx;
-        default: ?;
-      endcase
-    f7_FMIN_S:
-      case (funct3[0])
-        1'b0: FMin;
-        1'b1: FMax;
-      endcase
-    f7_FCMP_S:
-      case (funct7[1:0])
-        2'b00: FLe;
-        2'b01: FLt;
-        2'b10: FEq;
-        default: ?;
-      endcase
-    f7_FCVT_W_S:
-      case (rs2)
-        1'b0: FCvt_WF;
-        1'b1: FCvt_WUF;
-      endcase
-    f7_FMV_X_S:
-      case (funct3[0])
-        1'b0: FMv_XF;
-        1'b1: FClass;
-      endcase
-    f7_FCVT_S_W:
-      case (rs2)
-        1'b0: FCvt_FW;
-        1'b1: FCvt_FWU;
-      endcase
-    f7_FMV_S_X: FMv_FX;
-    default:    ?;
-  endcase;
+function FpuFunc getFpuFunc(Bit#(7) funct7, Bit#(1) rs2, Bit#(3) funct3);
+  let u = rs2 & pack(funct7[6:5] == 2'b11);
+  if (!unpack(funct7[4])) funct3 = 0;
+  let funct3_mask =
+    unpack(funct7[6]) ? zeroExtend(funct3) : {1'b0, funct3[1], 1'b0, funct3[0], 1'b0};
+  return unpack(funct7[6:2] | zeroExtend(u) | funct3_mask);
+endfunction
 
 (* noinline *)
 function DecodedInst decode(RawInst inst);
