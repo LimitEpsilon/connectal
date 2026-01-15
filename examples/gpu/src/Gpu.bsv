@@ -632,7 +632,7 @@ module mkCore(Core);
 
   method Action getError = error.deq;
 
-  method Action putDMemResp(MemResp#(ThreadNum) resp);
+  method Action putDMemResp(MemResp#(ThreadNum) resp) if (memOut.notEmpty);
     match MEMCont {warp: .warp, sign: .sign, byteen: .en, dst: .dst} = memOut.first;
     Bool isWord = unpack(en[3]);
     Bool isHalf = unpack(en[1]);
@@ -652,7 +652,7 @@ module mkCore(Core);
     memOut.deq;
   endmethod
 
-  method Action putIMemResp(Data resp);
+  method Action putIMemResp(Data resp) if (ifOut.notEmpty);
     match Warp {mask: .mask, wid: .wid, pc: .pc} = ifOut.first;
     let warp = Warp {mask: mask, wid: wid, pc: pc + 4};
     case (resp[6 : 2])
@@ -664,7 +664,7 @@ module mkCore(Core);
     ifOut.deq;
   endmethod
 
-  method Action putCsrResp(CsrResp#(ThreadNum) resp);
+  method Action putCsrResp(CsrResp#(ThreadNum) resp) if (csrOut.notEmpty);
     match SimpleEXCont {warp: .warp, dst: .dst} = csrOut.first;
     let lowerWid = warp.wid[0];
     let upperWid = warp.wid[logWarpNum-1 : 1];

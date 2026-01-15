@@ -229,8 +229,11 @@ module mkBRAMFifo#(Bool guardEnq, Bool guardDeq) (Fifo#(n, t))
 
   Reg#(Maybe#(Tuple2#(Bit#(d), t)))    rCache    <- mkReg(tagged Invalid);
 
-  Bool nEmpty = rRdPtr != rWrPtr;
-  Bool nFull  = rRdPtr + fromInteger(valueOf(n)) != rWrPtr;
+  Bit#(l) lowerRdPtr = truncate(rRdPtr);
+  Bit#(l) lowerWrPtr = truncate(rWrPtr);
+  Bool lowerNeq = lowerRdPtr != lowerWrPtr;
+  Bool nEmpty = msb(rRdPtr) != msb(rWrPtr) || lowerNeq;
+  Bool nFull  = msb(rRdPtr) == msb(rWrPtr) || lowerNeq;
 
   (* fire_when_enabled, no_implicit_conditions, aggressive_implicit_conditions *)
   rule portA;
