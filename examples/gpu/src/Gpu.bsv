@@ -199,10 +199,13 @@ module mkCore(Core);
   // we might need to introduce an epoch to distinguish btwn warps being cleared
   // and warps being submitted
   (* fire_when_enabled *)
-  rule do_IF(noClear);
+  rule do_IF(noClear && (warps.notFull || iMemReq.notFull));
     Bool selected = warpIn[0].notEmpty || warpIn[1].notEmpty;
+    Bool iMemReq_notFull = iMemReq.notFull;
+    Bool warps_notEmpty = warps.notEmpty;
+    Bool warps_notFull = warps.notFull;
     if (printDebug)
-      if (selected || (iMemReq.notFull && warps.notEmpty)) $display("do_IF");
+      if (selected || (iMemReq_notFull && warps_notEmpty)) $display("do_IF");
     Warp warp = ?;
     // select warpIn to clear
     if ((lastIF || !warpIn[1].notEmpty) && warpIn[0].notEmpty) begin
@@ -215,19 +218,15 @@ module mkCore(Core);
       lastIF <= True;
     end
 
-    // only enqueue warps with nonzero masks
-    selected = selected && warp.mask != 0;
-    // if warp can't be enqueued to iMemReq, enq to warps
-    if (selected && (!iMemReq.notFull || warps.notEmpty))
-      warps.enq(warp);
     // enq to iMemReq
-    if (iMemReq.notFull) begin
-      // warps only contains valid warps with nonzero masks
-      if (warps.notEmpty) begin
-        iMemReq.enq(warps.first);
-        warps.deq;
-      end else if (selected)
-        iMemReq.enq(warp);
+    if (iMemReq_notFull && (warps_notEmpty || selected)) begin
+      iMemReq.enq(warps_notEmpty ? warps.first : warp);
+      if (warps_notEmpty) warps.deq;
+    end
+
+    // enq to warps
+    if (selected && (!iMemReq_notFull || warps_notEmpty)) begin
+      warps.enq(warp);
     end
   endrule
 
@@ -632,7 +631,7 @@ module mkCore(Core);
 
   method Action getError = error.deq;
 
-  method Action putDMemResp(MemResp#(ThreadNum) resp) if (memOut.notEmpty);
+  method Action putDMemResp(MemResp#(ThreadNum) resp);
     match MEMCont {warp: .warp, sign: .sign, byteen: .en, dst: .dst} = memOut.first;
     Bool isWord = unpack(en[3]);
     Bool isHalf = unpack(en[1]);
@@ -652,7 +651,7 @@ module mkCore(Core);
     memOut.deq;
   endmethod
 
-  method Action putIMemResp(Data resp) if (ifOut.notEmpty);
+  method Action putIMemResp(Data resp);
     match Warp {mask: .mask, wid: .wid, pc: .pc} = ifOut.first;
     let warp = Warp {mask: mask, wid: wid, pc: pc + 4};
     case (resp[6 : 2])
@@ -664,7 +663,7 @@ module mkCore(Core);
     ifOut.deq;
   endmethod
 
-  method Action putCsrResp(CsrResp#(ThreadNum) resp) if (csrOut.notEmpty);
+  method Action putCsrResp(CsrResp#(ThreadNum) resp);
     match SimpleEXCont {warp: .warp, dst: .dst} = csrOut.first;
     let lowerWid = warp.wid[0];
     let upperWid = warp.wid[logWarpNum-1 : 1];
