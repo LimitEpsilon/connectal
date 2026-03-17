@@ -9,7 +9,7 @@ typedef enum {
 } ProcState deriving (Bits, Eq, FShow);
 interface ConnectalProcIndication;
   // START_LOAD_DATA, START_LOAD_KERNEL, START_EXEC, DO_EXEC
-	method Action sendMessage(Bit#(18) mess);
+	method Action sendMessage(Bit#(34) mess);
 	// DOWNLOAD_DATA
   method Action sendData(Bit#(32) data);
 endinterface

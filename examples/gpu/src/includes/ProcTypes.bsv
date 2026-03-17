@@ -37,7 +37,7 @@ typedef enum {
 
 typedef struct {
   CpuToHostType c2hType;
-  Bit#(16) data;
+  Data data;
 } CpuToHostData deriving(Bits, Eq, FShow);
 
 interface Proc;
@@ -255,15 +255,31 @@ Bit#(7) f7_FCVT_S_WU   = 7'b1101000; Bit#(5) rs2_FCVT_S_WU = 5'b00001;
 Bit#(7) f7_FMV_S_X     = 7'b1111000; Bit#(5) rs2_FMV_S_X   = 5'b00000; Bit#(3) f3_FMV_S_X  = 3'b000;
 
 typedef enum {
-  FAdd, FSub, FMul, FDiv, FSqrt,
-  FSgnj, FSgnjn, FSgnjx,
-  FMin, FMax,
-  FCvt_FF,
-  FCvt_WF, FCvt_WUF, FCvt_LF, FCvt_LUF,
-  FCvt_FW, FCvt_FWU, FCvt_FL, FCvt_FLU,
-  FEq, FLt, FLe,
-  FClass, FMv_XF, FMv_FX,
-  FMAdd, FMSub, FNMSub, FNMAdd
+  FAdd = 5'b00000,
+  FSub = 5'b00001,
+  FMul = 5'b00010,
+  FDiv = 5'b00011,
+  FSqrt = 5'b01011,
+  FSgnj = 5'b00100,
+  FSgnjn = 5'b00110,
+  FSgnjx = 5'b01100,
+  FMin = 5'b00101,
+  FMax = 5'b00111,
+  FCvt_FF = 5'b01000,
+  FCvt_WF = 5'b11000,
+  FCvt_WUF = 5'b11001,
+  FCvt_FW = 5'b11010,
+  FCvt_FWU = 5'b11011,
+  FEq = 5'b10110,
+  FLt = 5'b10101,
+  FLe = 5'b10100,
+  FClass = 5'b11101,
+  FMv_XF = 5'b11100,
+  FMv_FX = 5'b11110,
+  FMAdd = 5'b10000,
+  FMSub = 5'b10001,
+  FNMSub = 5'b10010,
+  FNMAdd = 5'b10011
 } FpuFunc deriving (Bits, Eq, FShow);
 
 typedef enum {
@@ -401,7 +417,7 @@ typedef struct {
 typedef struct {
   Warp     warp;
   RIndx    dst;
-} SimpleEXCont deriving(Bits, Eq, FShow);
+} WBCont deriving(Bits, Eq, FShow);
 
 typedef struct {
   Warp  warp;
