@@ -50,7 +50,7 @@ static const char *client_path = "./vx_socket.client";
 static int server_sock = -1;
 static int client_sock = -1;
 
-static void safe_recv(uint32_t *msg, int lineno) {
+static void safe_recv(uint64_t *msg, int lineno) {
   if (recv(client_sock, msg, sizeof(*msg), 0) == -1) {
     fprintf(stderr, "CLIENT: Error on line %d\n", lineno);
     close(client_sock);
@@ -64,6 +64,10 @@ static void safe_send(uint64_t *data, int lineno) {
     close(client_sock);
     exit(1);
   }
+}
+
+static uint32_t get_type(uint64_t msg) {
+  return (msg >> 32) & 3;
 }
 
 int main(int argc, char *const *argv) {
@@ -120,14 +124,15 @@ int main(int argc, char *const *argv) {
 
   fprintf(stderr, "CLIENT: Connected to driver code.\n");
 
-  uint32_t msg = 0;
+  uint64_t msg = 0;
   uint32_t type = 0;
-  uint16_t msg_data = 0;
+  uint32_t msg_data = 0;
   uint64_t data = 0;
+  uint32_t wasCycles = 0;
 
   safe_recv(&msg, __LINE__);
-  type = (msg >> 16) & 3;
-  msg_data = (uint16_t)msg;
+  type = get_type(msg);
+  msg_data = (uint32_t)msg;
   if (type != TellState) {
     fprintf(stderr, "Error, %d\n", __LINE__);
     goto cleanup_label;
@@ -147,7 +152,7 @@ int main(int argc, char *const *argv) {
   safe_recv(&msg, __LINE__); // ACK
 
   safe_recv(&msg, __LINE__);
-  type = (msg >> 16) & 3;
+  type = get_type(msg);
   msg_data = (uint16_t)msg;
   if (type != TellState) {
     fprintf(stderr, "Error, %d\n", __LINE__);
@@ -173,7 +178,7 @@ int main(int argc, char *const *argv) {
   safe_recv(&msg, __LINE__); // ACK
 
   safe_recv(&msg, __LINE__);
-  type = (msg >> 16) & 3;
+  type = get_type(msg);
   msg_data = (uint16_t)msg;
   if (type != TellState) {
     fprintf(stderr, "Error, %d\n", __LINE__);
@@ -187,10 +192,19 @@ int main(int argc, char *const *argv) {
 
   do {
     safe_recv(&msg, __LINE__);
-    type = (msg >> 16) & 3;
-    msg_data = (uint16_t)msg;
+    type = get_type(msg);
+    msg_data = (uint32_t)msg;
     if (type == PrintChar)
       fprintf(stderr, "%c", (char)msg_data);
+    else if (type == SignalDone) {
+      if (wasCycles) {
+        wasCycles = 0;
+        fprintf(stderr, "Instructions: %u ", msg_data);
+      } else {
+        wasCycles = 1;
+        fprintf(stderr, "Cycles: %u ", msg_data);
+      }
+    }
   } while (type != ExitCode);
 
   if (msg_data == 0)

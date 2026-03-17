@@ -37,7 +37,7 @@ typedef enum {
 
 typedef struct {
   CpuToHostType c2hType;
-  Bit#(16) data;
+  Data data;
 } CpuToHostData deriving(Bits, Eq, FShow);
 
 interface Proc;
@@ -417,7 +417,7 @@ typedef struct {
 typedef struct {
   Warp     warp;
   RIndx    dst;
-} SimpleEXCont deriving(Bits, Eq, FShow);
+} WBCont deriving(Bits, Eq, FShow);
 
 typedef struct {
   Warp  warp;

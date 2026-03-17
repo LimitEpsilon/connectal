@@ -80,19 +80,19 @@ module mkExIn(MergeTree#(2, Tuple2#(AluReq#(ThreadNum), EXCont)));
 endmodule
 
 (* synthesize *)
-module mkMulIn(MergeTree#(2, Tuple2#(MulReq#(ThreadNum), SimpleEXCont)));
+module mkMulIn(MergeTree#(2, Tuple2#(MulReq#(ThreadNum), WBCont)));
   let t <- mkMergeTree;
   return t;
 endmodule
 
 (* synthesize *)
-module mkDivIn(MergeTree#(2, Tuple2#(DivReq#(ThreadNum), SimpleEXCont)));
+module mkDivIn(MergeTree#(2, Tuple2#(DivReq#(ThreadNum), WBCont)));
   let t <- mkMergeTree;
   return t;
 endmodule
 
 (* synthesize *)
-module mkFpuIn(MergeTree#(2, Tuple2#(FpuReq#(ThreadNum), SimpleEXCont)));
+module mkFpuIn(MergeTree#(2, Tuple2#(FpuReq#(ThreadNum), WBCont)));
   let t <- mkMergeTree;
   return t;
 endmodule
@@ -110,7 +110,7 @@ module mkMemIn(MergeTree#(1, Tuple2#(MemReq#(ThreadNum), MEMCont)));
 endmodule
 
 (* synthesize *)
-module mkCsrIn(MergeTree#(2, Tuple2#(CsrReq#(ThreadNum), SimpleEXCont)));
+module mkCsrIn(MergeTree#(2, Tuple2#(CsrReq#(ThreadNum), WBCont)));
   let t <- mkMergeTree;
   return t;
 endmodule
@@ -170,13 +170,13 @@ module mkCore(Core);
   Fifo#(3, EXCont) exOut <- mkCFFifo(True, False);
   // from RF
   let mulIn <- mkMulIn;
-  Fifo#(4, SimpleEXCont) mulOut <- mkLatencyFifo(True, False);
+  Fifo#(4, WBCont) mulOut <- mkLatencyFifo(True, False);
   // from RF
   let divIn <- mkDivIn;
-  Fifo#(TAdd#(1, DivStage), SimpleEXCont) divOut <- mkLatencyFifo(True, False);
+  Fifo#(TAdd#(1, DivStage), WBCont) divOut <- mkLatencyFifo(True, False);
   // from RF
   let fpuIn <- mkFpuIn;
-  Fifo#(8, SimpleEXCont) fpuOut <- mkCFFifo(True, False);
+  Fifo#(8, WBCont) fpuOut <- mkCFFifo(True, False);
   Vector#(2, Fifo#(8, Vector#(ThreadNum, Data))) stData <- replicateM(mkBRAMFifo(True, False));
   // from RF
   let brIn <- mkBrIn;
@@ -186,7 +186,7 @@ module mkCore(Core);
   Fifo#(32, MEMCont) memOut <- mkBRAMFifo(True, False);
   // from RF
   let csrIn <- mkCsrIn;
-  FIFOF#(SimpleEXCont) csrOut <- mkGFIFOF(False, True);
+  FIFOF#(WBCont) csrOut <- mkGFIFOF(False, True);
 
   // signal error
   FIFOF#(void) error <- mkFIFOF;
@@ -371,7 +371,7 @@ module mkCore(Core);
       BruReq#(ThreadNum) brReq = BruReq {f: unpack(funct3), v1: rv1, v2: rv2};
       BRCont brCont = BRCont {warp: warp, takenPc: takenPc};
       CsrReq#(ThreadNum) csrReq = CsrReq {wid: warp.wid, mask: warp.mask, csr: csr, write: csrFunc == Csrw, data: rs1};
-      SimpleEXCont simpleCont = SimpleEXCont {warp: warp, dst: dst};
+      WBCont wbCont = WBCont {warp: warp, dst: dst};
       FpuReq#(ThreadNum) fpuReq = FpuReq {f: fpuFunc, v1: rv1, v2: rv2, v3: rv3};
 
       case (iType)
@@ -380,18 +380,18 @@ module mkCore(Core);
         MulDiv :
           if (mFunc.isDiv) begin
             DivReq#(ThreadNum) divReq = DivReq{f: mFunc.mOp, v1: rv1, v2: rv2};
-            divIn.iport[i].put(tuple2(divReq, simpleCont));
+            divIn.iport[i].put(tuple2(divReq, wbCont));
           end else begin
             MulReq#(ThreadNum) mulReq = MulReq{f: mFunc.mOp, v1: rv1, v2: rv2};
-            mulIn.iport[i].put(tuple2(mulReq, simpleCont));
+            mulIn.iport[i].put(tuple2(mulReq, wbCont));
           end
         St: begin
           exIn.iport[i].put(tuple2(exReq, exCont));
           stData[i].enq(rv2);
         end
         Br: brIn.iport[i].put(tuple2(brReq, brCont));
-        Csr: csrIn.iport[i].put(tuple2(csrReq, simpleCont));
-        Fpu: fpuIn.iport[i].put(tuple2(fpuReq, simpleCont));
+        Csr: csrIn.iport[i].put(tuple2(csrReq, wbCont));
+        Fpu: fpuIn.iport[i].put(tuple2(fpuReq, wbCont));
       endcase
 
       rfOut[i].deq;
@@ -489,7 +489,7 @@ module mkCore(Core);
   rule cont_MUL;
     if (printDebug)
       $display("cont_MUL");
-    match SimpleEXCont {warp: .warp, dst: .dst} = mulOut.first;
+    match WBCont {warp: .warp, dst: .dst} = mulOut.first;
     let res = muls.first;
     let lowerWid = warp.wid[0];
     let upperWid = warp.wid[logWarpNum-1 : 1];
@@ -507,7 +507,7 @@ module mkCore(Core);
   rule cont_DIV;
     if (printDebug)
       $display("cont_DIV");
-    match SimpleEXCont {warp: .warp, dst: .dst} = divOut.first;
+    match WBCont {warp: .warp, dst: .dst} = divOut.first;
     let res = divs.first;
     let lowerWid = warp.wid[0];
     let upperWid = warp.wid[logWarpNum-1 : 1];
@@ -525,7 +525,7 @@ module mkCore(Core);
   rule cont_FPU if (fpus.result_rdy);
     if (printDebug)
       $display("cont_FPU");
-    match SimpleEXCont {warp: .warp, dst: .dst} = fpuOut.first;
+    match WBCont {warp: .warp, dst: .dst} = fpuOut.first;
     let res = fpus.result_data;
     function Data f (FpuResult x) = truncate(x.data);
     let lowerWid = warp.wid[0];
@@ -622,7 +622,8 @@ module mkCore(Core);
     return req;
   endmethod
 
-  method ActionValue#(SchedReq) getSchedReq;
+  method ActionValue#(SchedReq) getSchedReq
+    if (!stData[0].notEmpty && !stData[1].notEmpty && !memIn.notEmpty && !csrIn.notEmpty);
     let req = schedIn.first;
     schedIn.deq;
 
@@ -664,7 +665,7 @@ module mkCore(Core);
   endmethod
 
   method Action putCsrResp(CsrResp#(ThreadNum) resp);
-    match SimpleEXCont {warp: .warp, dst: .dst} = csrOut.first;
+    match WBCont {warp: .warp, dst: .dst} = csrOut.first;
     let lowerWid = warp.wid[0];
     let upperWid = warp.wid[logWarpNum-1 : 1];
     RFWrReq#(ThreadNum) rfReq = RFWrReq {
@@ -724,6 +725,8 @@ module mkProc(Proc);
 
   FIFOF#(Bit#(8)) putchars <- mkGFIFOF(False, True);
   FIFOF#(void) error <- mkGFIFOF(False, True);
+  FIFOF#(Data) numCycles <- mkUGFIFOF;
+  FIFOF#(Data) numInsns <- mkUGFIFOF;
   FIFOF#(void) done <- mkGFIFOF(False, True);
 
   (* fire_when_enabled *)
@@ -819,10 +822,11 @@ module mkProc(Proc);
   (* fire_when_enabled *)
   rule get_done;
     scheduler.getDone;
-    match {.cycles, .numInst} <- csrf.stop;
-    $display("Executed cycles: %d, Number of instructions: %d", cycles, numInst);
+    match {.nCycles, .nInsns} <- csrf.stop;
     started <= False;
     done.enq(?);
+    numCycles.enq(nCycles);
+    numInsns.enq(nInsns);
   endrule
 
   method ActionValue#(CpuToHostData) cpuToHost if (putchars.notEmpty || error.notEmpty || done.notEmpty);
@@ -833,6 +837,14 @@ module mkProc(Proc);
     end else if (error.notEmpty) begin
       let ret = CpuToHostData {c2hType: ExitCode, data: 1};
       error.deq;
+      return ret;
+    end else if (numCycles.notEmpty) begin
+      let ret = CpuToHostData {c2hType: SignalDone, data: numCycles.first};
+      numCycles.deq;
+      return ret;
+    end else if (numInsns.notEmpty) begin
+      let ret = CpuToHostData {c2hType: SignalDone, data: numInsns.first};
+      numInsns.deq;
       return ret;
     end else begin
       let ret = CpuToHostData {c2hType: ExitCode, data: 0};

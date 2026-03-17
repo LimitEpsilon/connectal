@@ -31,7 +31,7 @@ static void safe_recv(uint64_t *data, int lineno) {
   }
 }
 
-static void safe_send(uint32_t *msg, int lineno) {
+static void safe_send(uint64_t *msg, int lineno) {
   if (send(client_sock, msg, sizeof(*msg), 0) == -1) {
     fprintf(stderr, "SERVER: Error on line %d\n", lineno);
     close(server_sock);
@@ -42,11 +42,12 @@ static void safe_send(uint32_t *msg, int lineno) {
 
 class ConnectalProcIndication : public ConnectalProcIndicationWrapper {
 public:
-  virtual void sendMessage(uint32_t msg) {
+  virtual void sendMessage(uint64_t msg) {
     safe_send(&msg, __LINE__);
   }
   virtual void sendData(uint32_t data) {
-    safe_send(&data, __LINE__);
+    uint64_t data_cast = data;
+    safe_send(&data_cast, __LINE__);
   }
   ConnectalProcIndication(unsigned int id)
       : ConnectalProcIndicationWrapper(id) {}
