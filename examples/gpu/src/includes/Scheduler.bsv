@@ -97,6 +97,7 @@ module mkScheduler(Scheduler);
   Vector#(BarNum, Reg#(Bit#(TLog#(WarpNum)))) barCount <- replicateM(mkReg(0)); // how many warps *left over* before synchronization
   Reg#(Bit#(TLog#(BarNum))) barDoneIdx <- mkRegU;
   Reg#(Bool) barDoneIdxValid <- mkReg(False);
+  Reg#(Bool) preloadBarMask <- mkReg(False);
 
   // requests
   FIFOF#(WspawnReq) wspawnReqs <- mkLFIFOF;
@@ -255,7 +256,7 @@ module mkScheduler(Scheduler);
   endrule
 
   (* fire_when_enabled *)
-  rule preload_barDoneIdx(!barReqs.notEmpty && !barDoneIdxValid);
+  rule preload_barDoneIdx(!barReqs.notEmpty && !barDoneIdxValid && !preloadBarMask);
     let b = pack(countLSB(barDone));
     if (barDone != 0) begin
       barMasks.portB.request.put(BRAMRequest{
@@ -267,17 +268,27 @@ module mkScheduler(Scheduler);
   endrule
 
   (* fire_when_enabled *)
-  rule process_bar(!barReqs.notEmpty && barDoneIdxValid);
+  rule process_bar(!barReqs.notEmpty && barDoneIdxValid && !preloadBarMask);
     let b = barDoneIdx;
     let masks <- barMasks.portB.response.get;
     if (findIndex(id, unpack(barAlloc[b])) matches tagged Valid .wid) begin
       let warp = Warp {mask: masks[wid], wid: pack(wid), pc: barPc[b]};
       resps.iport[3].put(SchedResp {warp: warp, write: False, top: 0});
       barAlloc[b] <= barAlloc[b] & ~(1 << wid);
+      preloadBarMask <= True;
     end else begin
       barDone <= barDone & ~(1 << b);
       barDoneIdxValid <= False;
     end
+  endrule
+
+  (* fire_when_enabled *)
+  rule preload_barMasks(!barReqs.notEmpty && preloadBarMask);
+    let b = barDoneIdx;
+    barMasks.portB.request.put(BRAMRequest{
+      write: False, address: b, datain: ?, responseOnWrite: False
+    });
+    preloadBarMask <= False;
   endrule
 
   method Action putSchedReq(SchedReq req) if (stackInit);
