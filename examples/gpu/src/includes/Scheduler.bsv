@@ -70,42 +70,39 @@ module mkStacks(BRAM2Port#(Bit#(TAdd#(LogWarpNum, LogThreadNum)), StackEnt));
   return ram;
 endmodule
 
-(* synthesize *)
-module mkBarMasks(BRAM2Port#(Bit#(TLog#(BarNum)), Vector#(WarpNum, Bit#(ThreadNum))));
-  let ram <- mkBypassBRAM;
-  return ram;
-endmodule
-
+// TMC, WSPAWN, SPLIT, JOIN, PRED, BAR
 (* synthesize *)
 module mkScheduler(Scheduler);
-  // Warp ID allocation — unchanged from BRAM version
+  // a bitvector of what even/odd wids are assigned, number of allocated even/odd wids
   Vector#(2, Reg#(Bit#(TDiv#(WarpNum, 2)))) widAlloc <- replicateM(mkReg(pack(replicate(True))));
-  Vector#(2, Reg#(Bit#(TLog#(TDiv#(TAdd#(WarpNum, 1), 2))))) widCount <- replicateM(mkReg(0));
+  Vector#(2, Reg#(Bit#(TLog#(TDiv#(TAdd#(WarpNum, 1), 2))))) widCount <- replicateM(mkReg(0)); // how many wids *were allocated*
 
-  // Divergence stacks — unchanged from BRAM version
+  // warp divergence stack for intra-warp synchronization
   let stacks <- mkStacks;
   Reg#(Bit#(TSub#(TAdd#(LogWarpNum, LogThreadNum), 1))) stackInitPtr <- mkReg(0);
   Reg#(Bool) stackInit <- mkReg(False);
-  Vector#(WarpNum, Reg#(Bit#(ThreadNum))) stackAlloc <- replicateM(mkReg(pack(replicate(True))));
+  Vector#(WarpNum, Reg#(Bit#(ThreadNum))) stackAlloc <- replicateM(mkReg(pack(replicate(True)))); // freelist
 
-  // Barrier state — barMasks is now a flop register file
+  // barrier management for inter-warp synchronization
+  // barMasks is a flop register file: combinational read, single-element write
   Reg#(Bit#(BarNum)) barDone <- mkReg(0);
   Vector#(BarNum, Reg#(Addr)) barPc <- replicateM(mkReg(0));
   Vector#(BarNum, Vector#(WarpNum, Reg#(Bit#(ThreadNum)))) barMasks
     <- replicateM(replicateM(mkReg(0)));
   Vector#(BarNum, Reg#(Bit#(WarpNum))) barAlloc <- replicateM(mkReg(0));
-  Vector#(BarNum, Reg#(Bit#(TLog#(WarpNum)))) barCount <- replicateM(mkReg(0));
+  Vector#(BarNum, Reg#(Bit#(TLog#(WarpNum)))) barCount <- replicateM(mkReg(0)); // how many warps *left over* before synchronization
 
-  // Request queues — unchanged
+  // requests
   FIFOF#(WspawnReq) wspawnReqs <- mkLFIFOF;
   Reg#(WspawnReq) curSpawn <- mkReg(unpack(0));
   FIFOF#(JoinReq) joinReqs <- mkLFIFOF;
   FIFOF#(SplitReq) splitReqs <- mkLFIFOF;
-  FIFOF#(BarReq) barReqs <- mkLFIFOF;
+  FIFOF#(BarReq) barReqs <- mkFIFOF;
 
+  // done
   FIFOF#(void) done <- mkFIFOF;
 
-  // Response merge tree — unchanged
+  // response
   // 0: unused, 1: TMC/PRED/WSPAWN, 2: SPLIT/JOIN, 3: BAR
   MergeTree#(4, SchedResp) resps <- mkMergeTree;
 
@@ -125,26 +122,26 @@ module mkScheduler(Scheduler);
     stackInit <= nextStackInitPtr == 0;
   endrule
 
-  // WSPAWN — unchanged from BRAM version
+  // WSPAWN
   (* fire_when_enabled *)
   rule do_wspawn(upperCurSpawn != 0);
     let evenWid = countLSB(widAlloc[0]);
     let oddWid = countLSB(widAlloc[1]);
     match WspawnReq {warp: .warp, count: .count, pc: .pc} = curSpawn;
     let nextCurSpawn = WspawnReq {warp: warp, count: count - 1, pc: pc};
-    if (widCount[1] < widCount[0]) begin
+    if (widCount[1] < widCount[0]) begin // allocate odd wid
       widCount[1] <= widCount[1] + 1;
       widAlloc[1] <= widAlloc[1] & ~(1 << oddWid);
       let newWarp = Warp {mask: 1, wid: {pack(oddWid), 1'b1}, pc: pc};
       resps.iport[1].put(SchedResp {warp: newWarp, write: True, top: 0});
       curSpawn <= nextCurSpawn;
-    end else if (widAlloc[0] != 0) begin
+    end else if (widAlloc[0] != 0) begin // allocate even wid
       widCount[0] <= widCount[0] + 1;
       widAlloc[0] <= widAlloc[0] & ~(1 << evenWid);
       let newWarp = Warp {mask: 1, wid: {pack(evenWid), 1'b0}, pc: pc};
       resps.iport[1].put(SchedResp {warp: newWarp, write: True, top: 0});
       curSpawn <= nextCurSpawn;
-    end
+    end // else, no free warps
   endrule
 
   (* fire_when_enabled *)
@@ -154,12 +151,12 @@ module mkScheduler(Scheduler);
     let alloc = widAlloc[wid[0]];
     let countNeg = widCount[~wid[0]];
     let count = widCount[wid[0]];
-    if (unpack(curSpawn.count[0])) begin
+    if (unpack(curSpawn.count[0])) begin // valid
       if (mask != 0)
         resps.iport[1].put(SchedResp {warp: curSpawn.warp, write: False, top: 0});
       else begin
-        widAlloc[wid[0]] <= alloc | (1 << upperWid);
-        widCount[wid[0]] <= count == 0 ? 0 : count - 1;
+        widAlloc[wid[0]] <= alloc | (1 << upperWid); // restore alloc
+        widCount[wid[0]] <= count == 0 ? 0 : count - 1; // restore count
         if (countNeg == 0 && count == 1) done.enq(?);
       end
     end
@@ -168,19 +165,19 @@ module mkScheduler(Scheduler);
       curSpawn <= wspawnReqs.first;
       wspawnReqs.deq;
     end else begin
-      curSpawn <= unpack(0);
+      curSpawn <= unpack(0); // turn off
     end
   endrule
 
-  // SPLIT — unchanged from BRAM version
+  // SPLIT
   (* fire_when_enabled *)
   rule do_split(stackInit && !joinReqs.notEmpty);
     match SplitReq {warp: .warp, predMask: .predMask, top: .top} = splitReqs.first;
     match Warp {wid: .wid, pc: .pc, mask: .mask} = warp;
     let allocMask = stackAlloc[wid];
-    let ptr = pack(countLSB(allocMask));
+    let ptr = pack(countLSB(allocMask)); // never fails
     Bool isDivergent = (predMask != 0) && (predMask != mask);
-    if (isDivergent) begin
+    if (isDivergent) begin // allocate new entry
       let ent = StackEnt{next: top, divMask: mask, convMask: 0, ipdom: ?};
       if (printDebug)
         $display(fshow("Split: ") + fshow(warp) + fshow(ent));
@@ -195,7 +192,7 @@ module mkScheduler(Scheduler);
     splitReqs.deq;
   endrule
 
-  // JOIN — unchanged from BRAM version
+  // JOIN
   (* fire_when_enabled *)
   rule do_join(stackInit && joinReqs.notEmpty);
     match JoinReq {warp: .warp, top: .top} = joinReqs.first;
@@ -231,25 +228,23 @@ module mkScheduler(Scheduler);
 
   // BAR arrival — direct flop write, no BRAM round trip
   (* fire_when_enabled *)
-  rule do_bar(barReqs.notEmpty);
+  rule do_bar(barDone == 0);
     match BarReq {warp: .warp, barId: .b, count: .count} = barReqs.first;
     match Warp {wid: .wid, pc: .pc, mask: .mask} = warp;
-    if (barDone[b] == 0) begin
-      barMasks[b][wid] <= mask;
+    barMasks[b][wid] <= mask;
 
-      let doUpdate = count == 1 || barCount[b] == 1;
-      barDone <= barDone | (extend(pack(doUpdate)) << b);
-      barPc[b] <= pc;
+    let doUpdate = count == 1 || barCount[b] == 1;
+    barDone <= barDone | (extend(pack(doUpdate)) << b);
+    barPc[b] <= pc;
 
-      barAlloc[b] <= barAlloc[b] | (1 << wid);
-      barCount[b] <= barCount[b] == 0 ? truncate(count) - 1 : barCount[b] - 1;
-      barReqs.deq;
-    end
+    barAlloc[b] <= barAlloc[b] | (1 << wid);
+    barCount[b] <= barCount[b] == 0 ? truncate(count) - 1 : barCount[b] - 1;
+    barReqs.deq;
   endrule
 
   // BAR release — single rule, combinational reads, 1 warp/cycle
   (* fire_when_enabled *)
-  rule process_bar(!barReqs.notEmpty && barDone != 0);
+  rule process_bar(barDone != 0);
     let b = pack(countLSB(barDone));
     if (findIndex(id, unpack(barAlloc[b])) matches tagged Valid .wid) begin
       let warp = Warp {mask: barMasks[b][wid], wid: pack(wid), pc: barPc[b]};
@@ -299,3 +294,4 @@ module mkScheduler(Scheduler);
     return resp;
   endmethod
 endmodule
+
