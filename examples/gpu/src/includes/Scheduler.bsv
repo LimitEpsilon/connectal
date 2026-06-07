@@ -43,8 +43,6 @@ typedef struct {
   Maybe#(StackPtr) top;
 } SplitReq deriving (Bits, Eq, FShow);
 
-// the PC to continue after divergence is the pc from the JOIN request
-// so no need to keep it in the stack
 typedef struct {
   Maybe#(StackPtr) next;
   Bit#(ThreadNum) divMask; // mask of threads that are still divergent
@@ -70,6 +68,12 @@ module mkStacks(BRAM2Port#(Bit#(TAdd#(LogWarpNum, LogThreadNum)), StackEnt));
   return ram;
 endmodule
 
+(* synthesize *)
+module mkBars(BRAM1Port#(Bit#(TAdd#(LogBarNum, LogWarpNum)), Warp));
+  let ram <- mkBRAM1Server(defaultValue);
+  return ram;
+endmodule
+
 // TMC, WSPAWN, SPLIT, JOIN, PRED, BAR
 (* synthesize *)
 module mkScheduler(Scheduler);
@@ -84,11 +88,8 @@ module mkScheduler(Scheduler);
   Vector#(WarpNum, Reg#(Bit#(ThreadNum))) stackAlloc <- replicateM(mkReg(pack(replicate(True)))); // freelist
 
   // barrier management for inter-warp synchronization
-  // barMasks is a flop register file: combinational read, single-element write
-  Reg#(Bit#(BarNum)) barDone <- mkReg(0);
-  Vector#(BarNum, Reg#(Addr)) barPc <- replicateM(mkReg(0));
-  Vector#(BarNum, Vector#(WarpNum, Reg#(Bit#(ThreadNum)))) barMasks
-    <- replicateM(replicateM(mkReg(0)));
+  let bars <- mkBars;
+  Reg#(Maybe#(Bit#(LogBarNum))) barDone <- mkReg(tagged Invalid);
   Vector#(BarNum, Reg#(Bit#(WarpNum))) barAlloc <- replicateM(mkReg(0));
   Vector#(BarNum, Reg#(Bit#(TLog#(WarpNum)))) barCount <- replicateM(mkReg(0)); // how many warps *left over* before synchronization
 
@@ -226,33 +227,44 @@ module mkScheduler(Scheduler);
     joinReqs.deq;
   endrule
 
-  // BAR arrival — direct flop write, no BRAM round trip
+  // BAR arrival
+  // well-formedness: all barrier requests must have same count <> 1
   (* fire_when_enabled *)
-  rule do_bar(barDone == 0);
+  rule do_bar(!isValid(barDone));
     match BarReq {warp: .warp, barId: .b, count: .count} = barReqs.first;
-    match Warp {wid: .wid, pc: .pc, mask: .mask} = warp;
-    barMasks[b][wid] <= mask;
 
-    let doUpdate = count == 1 || barCount[b] == 1;
-    barDone <= barDone | (extend(pack(doUpdate)) << b);
-    barPc[b] <= pc;
+    bars.portA.request.put(BRAMRequest {
+      write: True, address: {b, warp.wid}, datain: warp, responseOnWrite: False
+    });
 
-    barAlloc[b] <= barAlloc[b] | (1 << wid);
-    barCount[b] <= barCount[b] == 0 ? truncate(count) - 1 : barCount[b] - 1;
+    let c = barCount[b];
+    let isDone = c == 1;
+    let nextCount = (c == 0 ? truncate(count) : c) - 1;
+
+    barDone <= isDone ? tagged Valid b : tagged Invalid;
+    barAlloc[b] <= barAlloc[b] | (1 << warp.wid);
+    barCount[b] <= nextCount;
     barReqs.deq;
   endrule
 
-  // BAR release — single rule, combinational reads, 1 warp/cycle
+  // BAR release
   (* fire_when_enabled *)
-  rule process_bar(barDone != 0);
-    let b = pack(countLSB(barDone));
+  rule process_bar(isValid(barDone));
+    let b = fromMaybe(?, barDone);
     if (findIndex(id, unpack(barAlloc[b])) matches tagged Valid .wid) begin
-      let warp = Warp {mask: barMasks[b][wid], wid: pack(wid), pc: barPc[b]};
-      resps.iport[3].put(SchedResp {warp: warp, write: False, top: 0});
+      bars.portA.request.put(BRAMRequest {
+        write: False, address: {b, pack(wid)}, datain: ?, responseOnWrite: False
+      });
       barAlloc[b] <= barAlloc[b] & ~(1 << wid);
     end else begin
-      barDone <= barDone & ~(1 << b);
+      barDone <= tagged Invalid;
     end
+  endrule
+
+  (* fire_when_enabled *)
+  rule finish_bar;
+    let warp <- bars.portA.response.get;
+    resps.iport[3].put(SchedResp {warp: warp, write: False, top: 0});
   endrule
 
   method Action putSchedReq(SchedReq req) if (stackInit);
