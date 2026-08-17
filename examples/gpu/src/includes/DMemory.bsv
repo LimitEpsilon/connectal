@@ -11,6 +11,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 */
 
 import Vector::*;
+import Count::*;
 import Fifo::*;
 import GetPut::*;
 import ClientServer::*;
@@ -43,7 +44,7 @@ endfunction
 module mkDMemoryServer(MemoryServer#(MemHeight, PhysDataSz));
   // In simulation we always init memory from a fixed VMH file (for speed)
   RegFile#(Bit#(MemHeight), Bit#(PhysDataSz)) mem <- mkRegFileFull;
-  Fifo#(120, Bit#(PhysDataSz)) responses <- mkLatencyFifo(True, True); // simulate latency from DRAM
+  Fifo#(2, Bit#(PhysDataSz)) responses <- mkCFFifo(True, True);
 
   interface Put request;
     method Action put(MemoryRequest#(MemHeight, PhysDataSz) req);
@@ -82,24 +83,51 @@ interface DMemoryRouter#(numeric type n);
   interface MemoryClient#(MemHeight, PhysDataSz) dMemClient;
 endinterface
 
+typedef 98 Latency;
+
 (* synthesize *)
 module mkDMemoryRouter(DMemoryRouter#(ThreadNum));
   Fifo#(1, MemoryRequest#(MemHeight, PhysDataSz)) reqs <- mkBypassFifo(True, True);
-  Fifo#(1, MemoryResponse#(PhysDataSz)) resps <- mkBypassFifo(True, True);
+  Fifo#(Latency, MemoryResponse#(PhysDataSz)) resps <- mkBRAMFifo(False, False);
+  Reg#(Bit#(Latency)) lat <- mkReg(0);
+  PulseWire latEnq <- mkPulseWire;
+  PulseWire latDeq <- mkPulseWire;
 
   let m =
     interface MemoryServer;
       interface request = toPut(reqs);
-      interface response = toGet(resps);
+      interface Get response;
+        method ActionValue#(MemoryResponse#(PhysDataSz)) get if (lat[0] == 1);
+          latDeq.send;
+          let ret = resps.first;
+          resps.deq;
+          return ret;
+        endmethod
+      endinterface
     endinterface;
 
   let s <- mkVecMemoryServer(m);
+
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule latEnqDeq;
+    let idx = countLSB(lat);
+    let x = lat;
+    if (!latDeq) x[idx] = 1;
+    x = x >> 1;
+    if (latEnq) x[valueOf(Latency)-1] = 1;
+    lat <= x;
+  endrule
 
   interface request = s.request;
   interface response = s.response;
   interface MemoryClient dMemClient;
     interface request = toGet(reqs);
-    interface response = toPut(resps);
+    interface Put response;
+      method Action put(MemoryResponse#(PhysDataSz) data) if (msb(lat) == 0);
+        latEnq.send;
+        resps.enq(data);
+      endmethod
+    endinterface
   endinterface
 endmodule
 

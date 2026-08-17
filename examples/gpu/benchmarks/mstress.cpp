@@ -100,7 +100,7 @@ void gen_src_data(std::vector<float>& test_data,
 
 // originally in the main function
 uint32_t num_cores = 1;
-uint32_t num_warps = 8;
+uint32_t num_warps = 16;
 uint32_t num_threads = 4;
 uint32_t total_threads = num_cores * num_warps * num_threads;
 

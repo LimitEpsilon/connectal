@@ -284,7 +284,7 @@ module mkCore(Core);
       Fence: noAction;
       // enq into scoreboard
       default:
-        scoreboards[lowerWid].iport[upperWid].put(tuple2(rdReq, rfCont));
+        scoreboards[lowerWid].enq(rdReq, rfCont);
     endcase
 
     iMemResp.deq;
@@ -375,7 +375,7 @@ module mkCore(Core);
       FpuReq#(ThreadNum) fpuReq = FpuReq {f: fpuFunc, v1: rv1, v2: rv2, v3: rv3};
 
       case (iType)
-        Alu, Ld, Jr: exIn.iport[i].put(tuple2(exReq, exCont));
+        Alu, Jr: exIn.iport[i].put(tuple2(exReq, exCont));
         Sched: schedIn.iport[i].put(schedReq);
         MulDiv :
           if (mFunc.isDiv) begin
@@ -385,7 +385,7 @@ module mkCore(Core);
             MulReq#(ThreadNum) mulReq = MulReq{f: mFunc.mOp, v1: rv1, v2: rv2};
             mulIn.iport[i].put(tuple2(mulReq, wbCont));
           end
-        St: begin
+        Ld, St: begin
           exIn.iport[i].put(tuple2(exReq, exCont));
           stData[i].enq(rv2);
         end
@@ -477,7 +477,7 @@ module mkCore(Core);
       end
       default: begin
         memIn.iport[0].put(tuple2(memReq, memCont));
-        if (isWrite) stData[lowerWid].deq;
+        stData[lowerWid].deq;
       end
     endcase
 
@@ -690,8 +690,6 @@ module mkCore(Core);
     for (Integer i = 0; i < 2; i = i + 1) begin
       warpIn[i].clear;
       rfIn[i].clear;
-      rfs[i].clear;
-      scoreboards[i].clear;
     end
     alus.clear;
     muls.clear;
@@ -718,7 +716,7 @@ module mkProc(Proc);
   // CSR
   let csrf <- mkCsrFile;
   // SCHED
-  let scheduler <- mkScheduler;
+  let scheduler <- mkOldScheduler;
   Reg#(Addr) startPc <- mkReg(0);
   Reg#(Data) kernelArg <- mkReg(0);
   Reg#(Bool) started <- mkReg(False);

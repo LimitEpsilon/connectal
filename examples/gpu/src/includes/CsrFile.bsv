@@ -72,7 +72,7 @@ module mkCsrFile(CsrFile#(ThreadNum));
     pending <= tagged Invalid;
   endrule
 
-  method Action start(Data kernel_arg) if (!startReg);
+  method Action start(Data kernel_arg) if (!startReg && !isPending);
     startReg <= True;
     cycles <= 0;
     numInsts <= 0;
@@ -115,7 +115,7 @@ module mkCsrFile(CsrFile#(ThreadNum));
             CSRwid: zeroExtend(wid);
             CSRtid: zeroExtend(tid);
             CSRtmask: zeroExtend(mask);
-            default: ?;
+            default: 0;
           endcase;
       end
       resps.enq(rd);

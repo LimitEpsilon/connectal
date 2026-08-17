@@ -47,7 +47,7 @@ CONNECTALFLAGS += --bscflags " -steps-max-intervals 50 +RTS -K256M -RTS"
 CONNECTALFLAGS += --bscflags " -show-schedule"
 
 # gpu specific defines
-CONNECTALFLAGS += -D THREAD_NUM=4 -D WARP_NUM=8
+CONNECTALFLAGS += -D THREAD_NUM=4 -D WARP_NUM=16
 
 ifeq ($(BOARD),vcu108)
 prebuild:: $(DDR4_V) $(SYNCFIFO_784_32) $(SYNCFIFO_640_32)
