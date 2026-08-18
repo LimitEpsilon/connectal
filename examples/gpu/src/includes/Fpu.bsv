@@ -1,1184 +1,287 @@
-// Copyright (c) 2016, 2017 Massachusetts Institute of Technology
-
-// Permission is hereby granted, free of charge, to any person
-// obtaining a copy of this software and associated documentation
-// files (the "Software"), to deal in the Software without
-// restriction, including without limitation the rights to use, copy,
-// modify, merge, publish, distribute, sublicense, and/or sell copies
-// of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-
-// The above copyright notice and this permission notice shall be
-// included in all copies or substantial portions of the Software.
-
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
-// BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
-// ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
-
 // Fpu.bsv
-// This file contains modules needed for hardware floating-point arithmetic.
-// The FpuExec module abstracts away the ISA implementation simplifying the
-// requirements for the hardware FPU units.
+// Single-precision vector floating-point unit built from the Berkeley
+// HardFloat modules in includes/hardfloat.
+//
+// Operands are recoded once, in mkVectorFpu's dispatch rule, and results are
+// unrecoded once, in its finish rule; every datapath in between carries the
+// 33-bit recoded form.  RawFloat is decoded where a datapath wants it rather
+// than carried between stages, since it is six bits wider and the decode is
+// a handful of gates.
+//
+// Three datapaths are replicated per thread: mkFloatMulAdd for the
+// arithmetic ops, mkFloatDivSqrt for FDiv and FSqrt, and mkFloatSimple for
+// everything else.  mkVectorFpu records the issue order in a FIFO and
+// collects from the matching one, so the three may have different latencies
+// without results going out of order.
 
 import Types::*;
 import ProcTypes::*;
 import Vector::*;
-import FIFO::*;
 import Fifo::*;
 import FIFOF::*;
 import ClientServer::*;
 import GetPut::*;
-import Divide::*;
-import SquareRoot::*;
 import FloatingPoint::*;
 import HardFloat::*;
+import MulAddRecFN::*;
+import DivSqrtRecFN::*;
 
-import "BDPI" function Float cpu_fma(Float x, Float y, Float z);
-function FloatingPoint#(e,m) canonicalNaN = FloatingPoint{sign: False, exp: '1, sfd: 1 << (valueof(m)-1)};
+typedef  8 FpExpW;
+typedef 24 FpSigW;
+typedef TAdd#(1, TAdd#(FpExpW, FpSigW)) RecFpW;
+
+Bit#(32) f32_one = 32'h3F800000;
+
+// The RISC-V canonical NaN (0x7FC00000) recoded: sign 0, the three-bit
+// special code 111 marking a NaN, and a payload whose leading bit is set so
+// the NaN is quiet.
+Bit#(RecFpW) recF32_canonicalNaN = {1'b0, 9'b111000000, 1'b1, 22'b0};
 
 typedef struct {
-  Bit#(64) data;
+  Bit#(32) data;
   Bit#(5)  fflags;
 } FpuResult deriving(Bits, Eq, FShow);
 
-interface FpuExec;
-    method Action       exec(FpuInst fInst, RVRoundMode rm, Bit#(64) rVal1, Bit#(64) rVal2, Bit#(64) rVal3);
-    method Bool         notEmpty; // True if there is any instruction in this pipeline
-    // output
-    method Bool         result_rdy;
-    method FpuResult    result_data;
-    method Action       result_deq;
-endinterface
+// A datapath result: either a recoded float or, for the ops that produce an
+// integer, a 32-bit value in the low bits.  Which one is decided from the
+// opcode in finish.
+typedef struct {
+  Bit#(RecFpW) data;
+  Bit#(5)      fflags;
+} FpuRecResult deriving(Bits, Eq, FShow);
 
-`ifndef USE_DUMMY_FPU
-
-function Tuple2#(FloatingPoint#(e,m), Exception) fmaFP(FloatingPoint#(e,m) in1, FloatingPoint#(e,m) in2, FloatingPoint#(e,m) in3, RoundMode rmode)
-        provisos (Add#(a__, TLog#(TAdd#(1, TAdd#(m, 5))), TAdd#(e, 1)),
-                  Add#(b__, TLog#(TAdd#(1, TAdd#(TAdd#(m, 1), TAdd#(m, 1)))), TAdd#(e, 1)));
-    let {mult_data, mult_exception} = multFP(in1, in2, rmode);
-    let {final_data, add_exception} = addFP(mult_data, in3, rmode);
-    return tuple2(final_data, mult_exception | add_exception);
-endfunction
-
-// Double Precision FPU Pipelines
-`ifndef REUSE_FMA
-// If reusing the FMA, don't bother compiling these.
-// Hopefully this reduces compilation/synthesis time.
-// (* synthesize, gate_all_clocks *)
-module mkDoubleAdd(Server#(Tuple3#(Double, Double, RoundMode), Tuple2#(Double, Exception)));
-    let fpu <- mkFloatingPointAdder;
-    return fpu;
-endmodule
-// (* synthesize, gate_all_clocks *)
-module mkDoubleMult(Server#(Tuple3#(Double, Double, RoundMode), Tuple2#(Double, Exception)));
-    let fpu <- mkFloatingPointMultiplier;
-    return fpu;
-endmodule
-`endif
-`ifndef NO_FDIV
-// (* synthesize, gate_all_clocks *)
-module mkDoubleDiv(Server#(Tuple3#(Double, Double, RoundMode), Tuple2#(Double, Exception)));
-    let int_div <- mkDivider(2);
-    let fpu <- mkFloatingPointDivider(int_div);
-    return fpu;
-endmodule
-`endif
-`ifndef NO_FSQRT
-// (* synthesize, gate_all_clocks *)
-module mkDoubleSqrt(Server#(Tuple2#(Double, RoundMode), Tuple2#(Double, Exception)));
-    let int_sqrt <- mkSquareRooter(3);
-    let fpu <- mkFloatingPointSquareRooter(int_sqrt);
-    return fpu;
-endmodule
-`endif
-// (* synthesize, gate_all_clocks *)
-module mkDoubleFMA(Server#(Tuple4#(Maybe#(Double), Double, Double, RoundMode), Tuple2#(Double, Exception)));
-    let fpu <- mkFloatingPointFusedMultiplyAccumulate;
-    return fpu;
-endmodule
-// Single Precision FPU Pipelines
-(* synthesize, gate_all_clocks *)
-module mkFloatAdd(Server#(Tuple3#(Float, Float, RoundMode), Tuple2#(Float, Exception)));
-    let fpu <- mkFloatingPointAdder;
-    return fpu;
-endmodule
-(* synthesize, gate_all_clocks *)
-module mkFloatMult(Server#(Tuple3#(Float, Float, RoundMode), Tuple2#(Float, Exception)));
-    let fpu <- mkFloatingPointMultiplier;
-    return fpu;
-endmodule
-`ifndef NO_FDIV
-(* synthesize, gate_all_clocks *)
-module mkFloatDiv(Server#(Tuple3#(Float, Float, RoundMode), Tuple2#(Float, Exception)));
-  FIFOF#(void) dummy <- mkFIFOF;
-  interface Get response;
-    method ActionValue#(Tuple2#(Float, Exception)) get;
-      let x <- toGet(dummy).get;
-      return unpack(0);
-    endmethod
-  endinterface
-
-  interface Put request;
-    method Action put(Tuple3#(Float, Float, RoundMode) x) = dummy.enq(?);
-  endinterface
-//    let int_div <- mkDivider(2);
-//    let fpu <- mkFloatingPointDivider(int_div);
-//    return fpu;
-endmodule
-`endif
-`ifndef NO_FSQRT
-(* synthesize, gate_all_clocks *)
-module mkFloatSqrt(Server#(Tuple2#(Float, RoundMode), Tuple2#(Float, Exception)));
-  FIFOF#(void) dummy <- mkFIFOF;
-  interface Get response;
-    method ActionValue#(Tuple2#(Float, Exception)) get;
-      let x <- toGet(dummy).get;
-      return unpack(0);
-    endmethod
-  endinterface
-
-  interface Put request;
-    method Action put(Tuple2#(Float, RoundMode) x) = dummy.enq(?);
-  endinterface
-//    let int_sqrt <- mkSquareRooter(3);
-//    let fpu <- mkFloatingPointSquareRooter(int_sqrt);
-//    return fpu;
-endmodule
-`endif
-(* synthesize, gate_all_clocks *)
-module mkFloatFMA(Server#(Tuple4#(Maybe#(Float), Float, Float, RoundMode), Tuple2#(Float, Exception)));
-    let fpu <- mkFloatingPointFusedMultiplyAccumulate;
-    return fpu;
-endmodule
-
-module mkSimFloatFMA(Server#(Tuple4#(Maybe#(Float), Float, Float, RoundMode), Tuple2#(Float, Exception)));
-  FIFOF#(Float) resps <- mkFIFOF;
-  interface Put request;
-    method Action put(Tuple4#(Maybe#(Float), Float, Float, RoundMode) arg);
-      match {.z, .x, .y, .*} = arg;
-      let res = cpu_fma(x, y, fromMaybe(?, z));
-      resps.enq(res);
-    endmethod
-  endinterface
-
-  interface Get response;
-    method ActionValue#(Tuple2#(Float, Exception)) get;
-      let resp <- toGet(resps).get;
-      return tuple2(resp, unpack(0));
-    endmethod
-  endinterface
-endmodule
-
-module mkFloatWrapperForBinaryOp#(Server#(Tuple3#(Double, Double, RoundMode),Tuple2#(Double, Exception)) double_fpu)(Server#(Tuple3#(Float, Float, RoundMode), Tuple2#(Float, Exception)));
-    let verbose = False;
-    FIFO#(Tuple2#(RoundMode,Exception)) rmode_exc_fifo <- mkFIFO;
-    interface Put request;
-        method Action put(Tuple3#(Float, Float, RoundMode) x);
-            let rmode = tpl_3(x);
-            Double d1; Exception exc1;
-            Double d2; Exception exc2;
-            {d1, exc1} = convert(tpl_1(x), rmode, True);
-            {d2, exc2} = convert(tpl_2(x), rmode, True);
-            double_fpu.request.put(tuple3(d1, d2, rmode));
-            rmode_exc_fifo.enq(tuple2(rmode, exc1 | exc2));
-            if (verbose) $display("    exc1 = ", fshow(exc1));
-            if (verbose) $display("    exc2 = ", fshow(exc2));
-        endmethod
-    endinterface
-    interface Get response;
-        method ActionValue#(Tuple2#(Float, Exception)) get;
-            rmode_exc_fifo.deq;
-            let {rmode, exc_in} = rmode_exc_fifo.first;
-            let x <- double_fpu.response.get;
-            let exc_op = tpl_2(x);
-            Float f; Exception exc_conv;
-            {f, exc_conv} = convert(tpl_1(x), rmode, True);
-            if (verbose) $display("    exc_in = ", fshow(exc_in));
-            if (verbose) $display("    exc_op = ", fshow(exc_op));
-            if (verbose) $display("    exc_conv = ", fshow(exc_conv));
-            return tuple2(f, exc_in | exc_op | exc_conv);
-        endmethod
-    endinterface
-endmodule
-module mkFloatWrapperForSqrt#(Server#(Tuple2#(Double, RoundMode),Tuple2#(Double, Exception)) double_fpu)(Server#(Tuple2#(Float, RoundMode), Tuple2#(Float, Exception)));
-    FIFO#(Tuple2#(RoundMode,Exception)) rmode_exc_fifo <- mkFIFO;
-    interface Put request;
-        method Action put(Tuple2#(Float, RoundMode) x);
-            let rmode = tpl_2(x);
-            Double d1; Exception exc1;
-            {d1, exc1} = convert(tpl_1(x), rmode, True);
-            double_fpu.request.put(tuple2(d1, rmode));
-            rmode_exc_fifo.enq(tuple2(rmode, exc1 ));
-        endmethod
-    endinterface
-    interface Get response;
-        method ActionValue#(Tuple2#(Float, Exception)) get;
-            rmode_exc_fifo.deq;
-            let {rmode, exc_in} = rmode_exc_fifo.first;
-            let x <- double_fpu.response.get;
-            let exc_op = tpl_2(x);
-            Float f; Exception exc_conv;
-            {f, exc_conv} = convert(tpl_1(x), rmode, True);
-            return tuple2(f, exc_in | exc_op | exc_conv);
-        endmethod
-    endinterface
-endmodule
-module mkFloatWrapperForFMA#(Server#(Tuple4#(Maybe#(Double), Double, Double, RoundMode),Tuple2#(Double, Exception)) double_fpu)(Server#(Tuple4#(Maybe#(Float), Float, Float, RoundMode), Tuple2#(Float, Exception)));
-    FIFO#(Tuple2#(RoundMode,Exception)) rmode_exc_fifo <- mkFIFO;
-    interface Put request;
-        method Action put(Tuple4#(Maybe#(Float), Float, Float, RoundMode) x);
-            let rmode = tpl_4(x);
-            Maybe#(Double) d1_maybe = tagged Invalid;
-            Exception exc1 = unpack(0);
-            if (isValid(tpl_1(x))) begin
-                Double d1;
-                {d1, exc1} = convert(fromMaybe(?,tpl_1(x)), rmode, True);
-                d1_maybe = tagged Valid d1;
-            end
-            Double d2; Exception exc2;
-            Double d3; Exception exc3;
-            {d2, exc2} = convert(tpl_2(x), rmode, True);
-            {d3, exc3} = convert(tpl_3(x), rmode, True);
-            double_fpu.request.put(tuple4(d1_maybe, d2, d3, rmode));
-            rmode_exc_fifo.enq(tuple2(rmode, exc1 | exc2 | exc3));
-        endmethod
-    endinterface
-    interface Get response;
-        method ActionValue#(Tuple2#(Float, Exception)) get;
-            rmode_exc_fifo.deq;
-            let {rmode, exc_in} = rmode_exc_fifo.first;
-            let x <- double_fpu.response.get;
-            let exc_op = tpl_2(x);
-            Float f; Exception exc_conv;
-            {f, exc_conv} = convert(tpl_1(x), rmode, True);
-            return tuple2(f, exc_in | exc_op | exc_conv);
-        endmethod
-    endinterface
-endmodule
-module mkAddWrapperForFMA#(Server#(Tuple4#(Maybe#(ft), ft, ft, RoundMode), Tuple2#(ft, Exception)) fma_module)
-                            (Server#(Tuple3#(ft, ft, RoundMode), Tuple2#(ft, Exception)))
-                            provisos(Alias#(ft, FloatingPoint#(e,m)));
-    interface Put request;
-        method Action put(Tuple3#(ft, ft, RoundMode) x);
-            let in1 = tpl_1(x);
-            let in2 = tpl_2(x);
-            let rm = tpl_3(x);
-            ft one_const = one(False);
-            fma_module.request.put(tuple4(tagged Valid in1, in2, one_const, rm));
-        endmethod
-    endinterface
-    interface Get response;
-        method ActionValue#(Tuple2#(ft, Exception)) get;
-            let x <- fma_module.response.get();
-            return x;
-        endmethod
-    endinterface
-endmodule
-module mkMulWrapperForFMA#(Server#(Tuple4#(Maybe#(ft), ft, ft, RoundMode), Tuple2#(ft, Exception)) fma_module)
-                            (Server#(Tuple3#(ft, ft, RoundMode), Tuple2#(ft, Exception)))
-                            provisos(Alias#(ft, FloatingPoint#(e,m)));
-    interface Put request;
-        method Action put(Tuple3#(ft, ft, RoundMode) x);
-            let in1 = tpl_1(x);
-            let in2 = tpl_2(x);
-            let rm = tpl_3(x);
-            fma_module.request.put(tuple4(tagged Invalid, in1, in2, rm));
-        endmethod
-    endinterface
-    interface Get response;
-        method ActionValue#(Tuple2#(ft, Exception)) get;
-            let x <- fma_module.response.get();
-            return x;
-        endmethod
-    endinterface
-endmodule
-
-// FCVT float -> float functions
-function Tuple2#(Double, Exception) fcvt_d_s (Float in, RoundMode rmode);
-    return convert(in, rmode, True);
-endfunction
-function Tuple2#(Float, Exception) fcvt_s_d (Double in, RoundMode rmode);
-    return convert(in, rmode, True);
-endfunction
-
-// FCVT float -> int functions
-function Tuple2#(Bit#(64), Exception) fcvt_l_f (FloatingPoint#(e,m) in, RoundMode rmode);
-    return float_to_int(in, False, False, rmode);
-endfunction
-function Tuple2#(Bit#(64), Exception) fcvt_lu_f (FloatingPoint#(e,m) in, RoundMode rmode);
-    return float_to_int(in, False, True, rmode);
-endfunction
-function Tuple2#(Bit#(64), Exception) fcvt_w_f (FloatingPoint#(e,m) in, RoundMode rmode);
-    return float_to_int(in, True, False, rmode);
-endfunction
-function Tuple2#(Bit#(64), Exception) fcvt_wu_f (FloatingPoint#(e,m) in, RoundMode rmode);
-    return float_to_int(in, True, True, rmode);
-endfunction
-
-// FCVT int -> float functions
-function Tuple2#(FloatingPoint#(e,m), Exception) fcvt_f_l (Bit#(64) in_bits, RoundMode rmode)
-        provisos (FixedFloatCVT#(FloatingPoint#(e, m), Int#(64)));
-    Int#(64) in = unpack(in_bits);
-    return vFixedToFloat(in, 1'b0, rmode);
-endfunction
-function Tuple2#(FloatingPoint#(e,m), Exception) fcvt_f_lu (Bit#(64) in_bits, RoundMode rmode)
-        provisos (FixedFloatCVT#(FloatingPoint#(e, m), UInt#(64)));
-    UInt#(64) in = unpack(in_bits);
-    return vFixedToFloat(in, 1'b0, rmode);
-endfunction
-function Tuple2#(FloatingPoint#(e,m), Exception) fcvt_f_w (Bit#(64) in_bits, RoundMode rmode)
-        provisos (FixedFloatCVT#(FloatingPoint#(e, m), Int#(32)));
-    Int#(32) in = unpack(truncate(in_bits));
-    return vFixedToFloat(in, 1'b0, rmode);
-endfunction
-function Tuple2#(FloatingPoint#(e,m), Exception) fcvt_f_wu (Bit#(64) in_bits, RoundMode rmode)
-        provisos (FixedFloatCVT#(FloatingPoint#(e, m), UInt#(32)));
-    UInt#(32) in = unpack(truncate(in_bits));
-    return vFixedToFloat(in, 1'b0, rmode);
-endfunction
-
-function Tuple2#(Bit#(64), Exception) fmin_s(Bit#(64) in1, Bit#(64) in2);
-    Float in1_f = unpack(in1[31:0]);
-    Float in2_f = unpack(in2[31:0]);
-    Float nan_f = qnan(); // canonical NAN
-    Exception e = unpack(0);
-
-    if (isSNaN(in1_f) || isSNaN(in2_f) || (isNaN(in1_f) && isNaN(in2_f))) begin
-        e.invalid_op = True;
-        return tuple2(zeroExtend(pack(nan_f)), e);
-    end else if (isNaN(in2_f)) begin
-        return tuple2(in1, e);
-    end else if (isNaN(in1_f)) begin
-        return tuple2(in2, e);
-    end else begin
-        let signLT = (in1_f.sign && !in2_f.sign);
-        let signEQ = in1_f.sign == in2_f.sign;
-        let absLT = {in1_f.exp, in1_f.sfd} < {in2_f.exp, in2_f.sfd};
-        if (signLT || (signEQ && (in1_f.sign ? !absLT : absLT))) begin
-            return tuple2(in1, e);
-        end else begin
-            return tuple2(in2, e);
-        end
-    end
-endfunction
-
-function Tuple2#(Bit#(64), Exception) fmin_d(Bit#(64) in1, Bit#(64) in2);
-    Double in1_f = unpack(in1);
-    Double in2_f = unpack(in2);
-    Double nan_f = qnan(); // canonical NAN
-    Exception e = unpack(0);
-
-    if (isSNaN(in1_f) || isSNaN(in2_f) || (isNaN(in1_f) && isNaN(in2_f))) begin
-        e.invalid_op = True;
-        return tuple2(pack(nan_f), e);
-    end else if (isNaN(in2_f)) begin
-        return tuple2(in1, e);
-    end else if (isNaN(in1_f)) begin
-        return tuple2(in2, e);
-    end else begin
-        let signLT = (in1_f.sign && !in2_f.sign);
-        let signEQ = in1_f.sign == in2_f.sign;
-        let absLT = {in1_f.exp, in1_f.sfd} < {in2_f.exp, in2_f.sfd};
-        if (signLT || (signEQ && (in1_f.sign ? !absLT : absLT))) begin
-            return tuple2(in1, e);
-        end else begin
-            return tuple2(in2, e);
-        end
-    end
-endfunction
-
-function Tuple2#(Bit#(64), Exception) fmax_s(Bit#(64) in1, Bit#(64) in2);
-    Float in1_f = unpack(in1[31:0]);
-    Float in2_f = unpack(in2[31:0]);
-    Float nan_f = qnan(); // canonical NAN
-    Exception e = unpack(0);
-
-    if (isSNaN(in1_f) || isSNaN(in2_f) || (isNaN(in1_f) && isNaN(in2_f))) begin
-        e.invalid_op = True;
-        return tuple2(zeroExtend(pack(nan_f)), e);
-    end else if (isNaN(in2_f)) begin
-        return tuple2(in1, e);
-    end else if (isNaN(in1_f)) begin
-        return tuple2(in2, e);
-    end else begin
-        let signGT = (!in1_f.sign && in2_f.sign);
-        let signEQ = in1_f.sign == in2_f.sign;
-        let absGT = {in1_f.exp, in1_f.sfd} > {in2_f.exp, in2_f.sfd};
-        if (signGT || (signEQ && (in1_f.sign ? !absGT : absGT))) begin
-            return tuple2(in1, e);
-        end else begin
-            return tuple2(in2, e);
-        end
-    end
-endfunction
-
-function Tuple2#(Bit#(64), Exception) fmax_d(Bit#(64) in1, Bit#(64) in2);
-    Double in1_f = unpack(in1);
-    Double in2_f = unpack(in2);
-    Double nan_f = qnan(); // canonical NAN
-    Exception e = unpack(0);
-
-    if (isSNaN(in1_f) || isSNaN(in2_f) || (isNaN(in1_f) && isNaN(in2_f))) begin
-        e.invalid_op = True;
-        return tuple2(pack(nan_f), e);
-    end else if (isNaN(in2_f)) begin
-        return tuple2(in1, e);
-    end else if (isNaN(in1_f)) begin
-        return tuple2(in2, e);
-    end else begin
-        let signGT = (!in1_f.sign && in2_f.sign);
-        let signEQ = in1_f.sign == in2_f.sign;
-        let absGT = {in1_f.exp, in1_f.sfd} > {in2_f.exp, in2_f.sfd};
-        if (signGT || (signEQ && (in1_f.sign ? !absGT : absGT))) begin
-            return tuple2(in1, e);
-        end else begin
-            return tuple2(in2, e);
-        end
-    end
-endfunction
-
-function Tuple2#(Bit#(64), Exception) float_to_int(FloatingPoint#(e, m) in, Bool is_32bit, Bool is_unsigned, RoundMode rmode);
-    // 3 cases of exponents:
-    Bit#(64) out = 0;
-    Bit#(64) max_val = is_unsigned ? '1 : (is_32bit ? 64'h000000007FFFFFFF : 64'h7FFFFFFFFFFFFFFF);
-    Bit#(64) min_val = is_unsigned ? 0 : (is_32bit ? 64'hFFFFFFFF80000000 : 64'h8000000000000000);
-
-    Exception exc = unpack(0);
-    if (isNaN(in)) begin
-        out = max_val;
-        exc.invalid_op = True;
-    end else if (isInfinity(in)) begin
-        out = in.sign ? min_val : max_val;
-        exc.invalid_op = True;
-    end else if (isZero(in)) begin
-        out = 0;
-    end else begin
-        // Now actually do the conversion
-        Int#(TAdd#(e,TLog#(m))) bias_exp = fromInteger((2**(valueOf(e)-1))-1);
-        Int#(TAdd#(e,TLog#(m))) in_exp = unpack(zeroExtend(in.exp));
-        // The bottom two bits of int_val will be fractional data.
-        // The bottom bit holds information about all bits with lesser
-        // significance that were shifted out - same for top bit - this is
-        // necessary for rounding and overflow detection.
-        Bit#(TAdd#(66,m)) int_val = {64'b1, in.sfd, 2'b0}; // this is 2**m times larger than it should be - we will shift this to correct for that
-        int_val = saturating_shift_right(int_val, fromInteger(valueOf(m)) + bias_exp - in_exp);
-
-        // do rounding
-        // 00 : exact
-        // 01 : < 0.5
-        // 10 : = 0.5
-        // 11 : > 0.5
-        Bool round_up = False; // by magnitude (default behavior will be drop bits)
-        if (int_val[1:0] != 0) begin
-            exc.inexact = True;
-            case (rmode)
-                Rnd_Nearest_Even:       round_up = (int_val[1:0] == 2'b11) || ((int_val[1:0] == 2'b10) && (int_val[2] == 1));
-                Rnd_Nearest_Away_Zero:  round_up = (int_val[1] == 1);
-                Rnd_Plus_Inf:           round_up = !in.sign;
-                Rnd_Minus_Inf:          round_up = in.sign;
-                Rnd_Zero:               round_up = False;
-            endcase
-        end
-
-        // Take the integer part of int_val and round it up if necessary
-        Bit#(TAdd#(64,m)) int_val_rnd = truncateLSB(int_val) + (round_up ? 1 : 0);
-        // correct the output sign for negative numbers rounded to 0
-        Bool out_sign = (int_val_rnd == 0) ? False : in.sign;
-
-        // Now check to see if int_val_rnd is in range
-        Bit#(TAdd#(64,m)) mask_32bit = {0, 32'hFFFFFFFF};
-        Bit#(TAdd#(64,m)) mask_64bit = {0, 64'hFFFFFFFFFFFFFFFF};
-        if (is_unsigned) begin
-            if (out_sign) begin
-                // negative number - out of range
-                out = 0;
-                exc.invalid_op = True;
-            end else begin
-                // positive number
-                if (is_32bit) begin
-                    // WU
-                    if ((int_val_rnd & mask_32bit) == int_val_rnd) begin
-                        Bit#(32) val = truncate(int_val_rnd);
-                        out = signExtend(val);
-                    end else begin
-                        // out of range
-                        out = '1;
-                        exc.invalid_op = True;
-                    end
-                end else begin
-                    // LU
-                    if ((int_val_rnd & mask_64bit) == int_val_rnd) begin
-                        out = truncate(int_val_rnd);
-                    end else begin
-                        // out of range
-                        out = '1;
-                        exc.invalid_op = True;
-                    end
-                end
-            end
-        end else begin
-            // signed
-            if (is_32bit) begin
-                // W
-                Bit#(32) max_val = out_sign ? 32'h80000000 : 32'h7FFFFFFF;
-                if (((int_val_rnd & mask_32bit) == int_val_rnd) && (truncate(int_val_rnd) <= max_val)) begin
-                    Bit#(32) val = truncate(int_val_rnd);
-                    val = out_sign ? ((~val) + 1) : val;
-                    out = signExtend(val);
-                end else begin
-                    // out of range
-                    out = signExtend(max_val);
-                    exc.invalid_op = True;
-                end
-            end else begin
-                // L
-                Bit#(64) max_val = out_sign ? 64'h8000000000000000 : 64'h7FFFFFFFFFFFFFFF;
-                if (((int_val_rnd & mask_64bit) == int_val_rnd) && (truncate(int_val_rnd) <= max_val)) begin
-                    Bit#(64) val = truncate(int_val_rnd);
-                    out = out_sign ? ((~val) + 1) : val;
-                end else begin
-                    // out of range
-                    out = max_val;
-                    exc.invalid_op = True;
-                end
-            end
-        end
-    end
-    if (exc.invalid_op) begin
-        // by convention
-        exc.inexact = False;
-    end
-    return tuple2(out, exc);
-endfunction
-
-function Bit#(n) saturating_shift_right(Bit#(n) in, Int#(m) amt)
-        provisos (Add#(a__,1,n));
-    // This function saturates in each direction
-    Bool amt_sign = msb(amt) == 1;
-    Bit#(m) amt_abs = amt_sign ? ((~pack(amt))+1) : pack(amt);
-    Bit#(n) shifted = amt_sign ? (in << amt_abs) : (in >> amt_abs);
-    Bit#(n) shifted_out_mask = amt_sign ? ~('1 >> amt_abs) : ~('1 << amt_abs);
-    Bit#(1) saturated_bit = |(in & shifted_out_mask);
-    shifted = amt_sign ? (shifted | {saturated_bit, 0}) : (shifted | {0, saturated_bit});
-    return shifted;
-endfunction
-
-function Tuple2#(FloatingPoint#(e, m), Exception) int_to_float( Bit#(65) in, Bool is_32bit, Bool is_unsigned, RoundMode rmode )
-        provisos (FixedFloatCVT#(FloatingPoint#(e, m), Int#(65)));
-    Int#(65) in_signed;
-    if (is_32bit && is_unsigned) begin
-        in_signed = unpack(zeroExtend(in[31:0]));
-    end else if (is_32bit && !is_unsigned) begin
-        in_signed = unpack(signExtend(in[31:0]));
-    end else if(!is_32bit && is_unsigned) begin
-        in_signed = unpack(zeroExtend(in));
-    end else if(!is_32bit && !is_unsigned) begin
-        in_signed = unpack(signExtend(in));
-    end
-    return vFixedToFloat(in_signed, 1'b0, rmode);
-endfunction
-
-// exec function for simple operations
-// (* noinline *)
-function FpuResult execFpuSimple(FpuInst fpu_inst, RVRoundMode rm, Bit#(64) rVal1, Bit#(64) rVal2);
-    FpuResult fpu_result = FpuResult{data: 0, fflags: 0};
-
-    // Convert the Risc-V RVRoundMode to FloatingPoint::RoundMode
-    RoundMode fpu_rm = (case (rm)
-            RNE:      Rnd_Nearest_Even;
-            RTZ:      Rnd_Zero;
-            RDN:      Rnd_Minus_Inf;
-            RUP:      Rnd_Plus_Inf;
-            RMM:      Rnd_Nearest_Away_Zero;
-            RDyn:     Rnd_Nearest_Even;
-            default:  Rnd_Nearest_Even;
-        endcase);
-
-    if (fpu_inst.precision == Single) begin
-        // single precision
-        Float in1 = unpack(rVal1[31:0]);
-        Float in2 = unpack(rVal2[31:0]);
-        Float dst = unpack(0);
-        Maybe#(Bit#(64)) full_dst = Invalid;
-        Exception e = unpack(0);
-        let fpu_f = fpu_inst.func;
-        // Fpu Decoding
-        case (fpu_f)
-            // combinational instructions
-            FMin:     begin
-                Bit#(64) x;
-                {x, e} = fmin_s(rVal1, rVal2);
-                full_dst = tagged Valid x;
-            end
-            FMax:     begin
-                Bit#(64) x;
-                {x, e} = fmax_s(rVal1, rVal2);
-                full_dst = tagged Valid x;
-            end
-            FEq:        dst = unpack(zeroExtend(pack(compareFP(in1, in2) == EQ)));
-            FLt:        begin
-                dst = unpack(zeroExtend(pack(compareFP(in1, in2) == LT)));
-                if (isNaN(in1) || isNaN(in2)) begin
-                    e.invalid_op = True;
-                end
-            end
-            FLe:        begin
-                dst = unpack(zeroExtend(pack((compareFP(in1, in2) == LT) || (compareFP(in1, in2) == EQ))));
-                if (isNaN(in1) || isNaN(in2)) begin
-                    e.invalid_op = True;
-                end
-            end
-            // CLASS functions
-            FClass: begin
-                Bool exp_0s = (in1.exp == 0);
-                Bool exp_1s = (in1.exp == '1);
-                Bool sfd_0s = (in1.sfd == 0);
-                Bit#(10) res = 0;
-                res[0] = pack(in1.sign && exp_1s && sfd_0s);                // -inf
-                res[1] = pack(in1.sign && !exp_1s && !exp_0s);              // -normal
-                res[2] = pack(in1.sign && exp_0s && !sfd_0s);               // -subnormal
-                res[3] = pack(in1.sign && exp_0s && sfd_0s);                // -0
-                res[4] = pack(!in1.sign && exp_0s && sfd_0s);               // +0
-                res[5] = pack(!in1.sign && exp_0s && !sfd_0s);              // +subnormal
-                res[6] = pack(!in1.sign && !exp_1s && !exp_0s);             // +normal
-                res[7] = pack(!in1.sign && exp_1s && sfd_0s);               // -inf
-                res[8] = pack(exp_1s && !sfd_0s && (msb(in1.sfd) == 0));    // signaling NaN
-                res[9] = pack(exp_1s && !sfd_0s && (msb(in1.sfd) == 1));    // quiet NaN
-                full_dst = tagged Valid zeroExtend(res);
-            end
-            // Sign Injection
-            FSgnj:    begin
-                dst = in1;
-                dst.sign = in2.sign;
-            end
-            FSgnjn: begin
-                dst = in1;
-                dst.sign = !in2.sign;
-            end
-            FSgnjx: begin
-                dst = in1;
-                dst.sign = unpack(pack(in1.sign) ^ pack(in2.sign));
-            end
-            // Float -> Bits
-            FMv_XF:     full_dst = tagged Valid signExtend(pack(in1));
-            // Bits -> Float
-            FMv_FX:     full_dst = tagged Valid zeroExtend(pack(in1));
-            // Float -> Float
-            FCvt_FF:    begin
-                Double in1_double = unpack(rVal1);
-                {dst, e} = fcvt_s_d(in1_double, fpu_rm);
-                if (isNaN(dst)) dst = canonicalNaN;
-            end
-            // Float -> Int
-            FCvt_WF:    begin
-                Bit#(64) dst_bits;
-                {dst_bits, e} = fcvt_w_f(in1, fpu_rm);
-                full_dst = tagged Valid dst_bits;
-            end
-            FCvt_WUF: begin
-                Bit#(64) dst_bits;
-                {dst_bits, e} = fcvt_wu_f(in1, fpu_rm);
-                full_dst = tagged Valid dst_bits;
-            end
-//            FCvt_LF:    begin
-//                Bit#(64) dst_bits;
-//                {dst_bits, e} = fcvt_l_f(in1, fpu_rm);
-//                full_dst = tagged Valid dst_bits;
-//            end
-//            FCvt_LUF: begin
-//                Bit#(64) dst_bits;
-//                {dst_bits, e} = fcvt_lu_f(in1, fpu_rm);
-//                full_dst = tagged Valid dst_bits;
-//            end
-            // Int -> Float
-            FCvt_FW: begin
-                {dst, e} = fcvt_f_w(rVal1, fpu_rm);
-                if (isNaN(dst)) dst = canonicalNaN;
-            end
-            FCvt_FWU: begin
-                {dst, e} = fcvt_f_wu(rVal1, fpu_rm);
-                if (isNaN(dst)) dst = canonicalNaN;
-            end
-//            FCvt_FL: begin
-//                {dst, e} = fcvt_f_l(rVal1, fpu_rm);
-//                if (isNaN(dst)) dst = canonicalNaN;
-//            end
-//            FCvt_FLU: begin
-//                {dst, e} = fcvt_f_lu(rVal1, fpu_rm);
-//                if (isNaN(dst)) dst = canonicalNaN;
-//            end
-        endcase
-        fpu_result.data = (full_dst matches tagged Valid .data ? data : zeroExtend(pack(dst)));
-        fpu_result.fflags = pack(e);
-    end else if (fpu_inst.precision == Double) begin
-        // double precision
-        Double in1 = unpack(rVal1);
-        Double in2 = unpack(rVal2);
-        Double dst = unpack(0);
-        Maybe#(Bit#(64)) full_dst = Invalid;
-        Exception e = unpack(0);
-        let fpu_f = fpu_inst.func;
-        // Fpu Decoding
-        case (fpu_f)
-            // combinational instructions
-            FMin:     begin
-                Bit#(64) x;
-                {x, e} = fmin_d(rVal1, rVal2);
-                full_dst = tagged Valid x;
-            end
-            FMax:     begin
-                Bit#(64) x;
-                {x, e} = fmax_d(rVal1, rVal2);
-                full_dst = tagged Valid x;
-            end
-            FEq:        dst = unpack(zeroExtend(pack(compareFP(in1, in2) == EQ)));
-            FLt:        begin
-                dst = unpack(zeroExtend(pack(compareFP(in1, in2) == LT)));
-                if (isNaN(in1) || isNaN(in2)) begin
-                    e.invalid_op = True;
-                end
-            end
-            FLe:        begin
-                dst = unpack(zeroExtend(pack((compareFP(in1, in2) == LT) || (compareFP(in1, in2) == EQ))));
-                if (isNaN(in1) || isNaN(in2)) begin
-                    e.invalid_op = True;
-                end
-            end
-            // CLASS functions
-            FClass: begin
-                Bool exp_0s = (in1.exp == 0);
-                Bool exp_1s = (in1.exp == '1);
-                Bool sfd_0s = (in1.sfd == 0);
-                Bit#(10) res = 0;
-                res[0] = pack(in1.sign && exp_1s && sfd_0s);                // -inf
-                res[1] = pack(in1.sign && !exp_1s && !exp_0s);              // -normal
-                res[2] = pack(in1.sign && exp_0s && !sfd_0s);               // -subnormal
-                res[3] = pack(in1.sign && exp_0s && sfd_0s);                // -0
-                res[4] = pack(!in1.sign && exp_0s && sfd_0s);               // +0
-                res[5] = pack(!in1.sign && exp_0s && !sfd_0s);              // +subnormal
-                res[6] = pack(!in1.sign && !exp_1s && !exp_0s);             // +normal
-                res[7] = pack(!in1.sign && exp_1s && sfd_0s);               // -inf
-                res[8] = pack(exp_1s && !sfd_0s && (msb(in1.sfd) == 0));    // signaling NaN
-                res[9] = pack(exp_1s && !sfd_0s && (msb(in1.sfd) == 1));    // quiet NaN
-                full_dst = tagged Valid zeroExtend(res);
-            end
-            // Sign Injection
-            FSgnj:    begin
-                dst = in1;
-                dst.sign = in2.sign;
-            end
-            FSgnjn: begin
-                dst = in1;
-                dst.sign = !in2.sign;
-            end
-            FSgnjx: begin
-                dst = in1;
-                dst.sign = unpack(pack(in1.sign) ^ pack(in2.sign));
-            end
-            // Float -> Bits
-            FMv_XF:     full_dst = tagged Valid pack(in1);
-            // Bits -> Float
-            FMv_FX:     full_dst = tagged Valid pack(in1);
-            // Float -> Float
-            FCvt_FF:    begin
-                Float in1_float = unpack(rVal1[31:0]);
-                {dst, e} = fcvt_d_s(in1_float, fpu_rm);
-                if (isNaN(dst)) dst = canonicalNaN;
-            end
-            // Float -> Int
-            FCvt_WF:    begin
-                Bit#(64) dst_bits;
-                {dst_bits, e} = fcvt_w_f(in1, fpu_rm);
-                full_dst = tagged Valid dst_bits;
-            end
-            FCvt_WUF: begin
-                Bit#(64) dst_bits;
-                {dst_bits, e} = fcvt_wu_f(in1, fpu_rm);
-                full_dst = tagged Valid dst_bits;
-            end
-//            FCvt_LF:    begin
-//                Bit#(64) dst_bits;
-//                {dst_bits, e} = fcvt_l_f(in1, fpu_rm);
-//                full_dst = tagged Valid dst_bits;
-//            end
-//            FCvt_LUF: begin
-//                Bit#(64) dst_bits;
-//                {dst_bits, e} = fcvt_lu_f(in1, fpu_rm);
-//                full_dst = tagged Valid dst_bits;
-//            end
-            // Int -> Float
-            FCvt_FW: begin
-                {dst, e} = fcvt_f_w(rVal1, fpu_rm);
-                if (isNaN(dst)) dst = canonicalNaN;
-            end
-            FCvt_FWU: begin
-                {dst, e} = fcvt_f_wu(rVal1, fpu_rm);
-                if (isNaN(dst)) dst = canonicalNaN;
-            end
-//            FCvt_FL: begin
-//                {dst, e} = fcvt_f_l(rVal1, fpu_rm);
-//                if (isNaN(dst)) dst = canonicalNaN;
-//            end
-//            FCvt_FLU: begin
-//                {dst, e} = fcvt_f_lu(rVal1, fpu_rm);
-//                if (isNaN(dst)) dst = canonicalNaN;
-//            end
-        endcase
-        fpu_result.data = (full_dst matches tagged Valid .data ? data : pack(dst));
-        fpu_result.fflags = pack(e);
-    end
-    return fpu_result;
-endfunction
-
-// (* synthesize, gate_all_clocks *)
-module mkFpuExecPipeline(FpuExec);
-    FIFO#(FpuResult) fpu_exec_fifo <- mkFIFO; // in parallel with pipelined FPUs
-    FIFO#(FpuInst) fpu_func_fifo <- mkFIFO; // in parallel with pipelined FPUs
-    FIFOF#(FpuResult) fpu_exec_fifo_out <- mkFIFOF; // all pipelined FPUs dequeue into this
-
-    // Pipelined units
-    // Double
-    let double_fma <- mkDoubleFMA;
-
-`ifdef REUSE_FMA
-    let double_add <- mkAddWrapperForFMA(double_fma);
-    let double_mult <- mkMulWrapperForFMA(double_fma);
-`else
-    let double_add <- mkDoubleAdd;
-    let double_mult <- mkDoubleMult;
-`endif
-
-`ifndef NO_FDIV
-    let double_div <- mkDoubleDiv;
-`endif
-`ifndef NO_FSQRT
-    let double_sqrt <- mkDoubleSqrt;
-`endif
-
-    // // Float
-    // let float_add <- mkFloatAdd;
-    // let float_mult <- mkFloatMult;
-    // let float_div <- mkFloatDiv;
-    // let float_sqrt <- mkFloatSqrt;
-    // let float_fma <- mkFloatFMA;
-
-    // Float ops implemented with Double FPUs
-    let float_fma <- mkFloatWrapperForFMA(double_fma);
-    let float_add <- mkFloatWrapperForBinaryOp(double_add);
-    let float_mult <- mkFloatWrapperForBinaryOp(double_mult);
-`ifndef NO_FDIV
-    let float_div <- mkFloatWrapperForBinaryOp(double_div);
-`endif
-`ifndef NO_FSQRT
-    let float_sqrt <- mkFloatWrapperForSqrt(double_sqrt);
-`endif
-
-    rule finish;
-        let x = fpu_exec_fifo.first;
-        let fpu_inst = fpu_func_fifo.first;
-        let fpu_f = fpu_inst.func;
-        fpu_exec_fifo.deq;
-        fpu_func_fifo.deq;
-
-        if (fpu_inst.precision == Single) begin
-            Float out = unpack(0);
-            Exception exc = unpack(0);
-            Bool pipeline_result = False;
-            // Fpu Decoding
-            case (fpu_f)
-                // pipeline instructions
-                FAdd:   begin {out, exc} <- float_add.response.get; pipeline_result = True; end
-                FSub:   begin {out, exc} <- float_add.response.get; pipeline_result = True; end
-                FMul:   begin {out, exc} <- float_mult.response.get; pipeline_result = True; end
-`ifndef NO_FDIV
-                FDiv:   begin {out, exc} <- float_div.response.get; pipeline_result = True; end
-`endif
-`ifndef NO_FSQRT
-                FSqrt:  begin {out, exc} <- float_sqrt.response.get; pipeline_result = True; end
-`endif
-                FMAdd:  begin {out, exc} <- float_fma.response.get; pipeline_result = True; end
-                FMSub:  begin {out, exc} <- float_fma.response.get; pipeline_result = True; end
-                FNMSub: begin {out, exc} <- float_fma.response.get; out = -out; pipeline_result = True; end
-                FNMAdd: begin {out, exc} <- float_fma.response.get; out = -out; pipeline_result = True; end
-            endcase
-            if (pipeline_result) begin
-                // canonicalize NaNs
-                if (isNaN(out)) out = canonicalNaN;
-                // update data and exception in x
-                x.data = zeroExtend(pack(out));
-                x.fflags = pack(exc);
-            end
-        end else if (fpu_inst.precision == Double) begin
-            Double out = unpack(0);
-            Exception exc = unpack(0);
-            Bool pipeline_result = False;
-            // Fpu Decoding
-            case (fpu_f)
-                // pipeline instructions
-                FAdd:   begin {out, exc} <- double_add.response.get; pipeline_result = True; end
-                FSub:   begin {out, exc} <- double_add.response.get; pipeline_result = True; end
-                FMul:   begin {out, exc} <- double_mult.response.get; pipeline_result = True; end
-`ifndef NO_FDIV
-                FDiv:   begin {out, exc} <- double_div.response.get; pipeline_result = True; end
-`endif
-`ifndef NO_FSQRT
-                FSqrt:  begin {out, exc} <- double_sqrt.response.get; pipeline_result = True; end
-`endif
-                FMAdd:  begin {out, exc} <- double_fma.response.get; pipeline_result = True; end
-                FMSub:  begin {out, exc} <- double_fma.response.get; pipeline_result = True; end
-                FNMSub: begin {out, exc} <- double_fma.response.get; out = -out; pipeline_result = True; end
-                FNMAdd: begin {out, exc} <- double_fma.response.get; out = -out; pipeline_result = True; end
-            endcase
-            if (pipeline_result) begin
-                // canonicalize NaNs
-                if (isNaN(out)) out = canonicalNaN;
-                // update data and exception in x
-                x.data = pack(out);
-                x.fflags = pack(exc);
-            end
-        end
-        fpu_exec_fifo_out.enq(x);
-    endrule
-
-    method Action exec(FpuInst fpu_inst, RVRoundMode rm, Bit#(64) rVal1, Bit#(64) rVal2, Bit#(64) rVal3);
-        // Convert the Risc-V RVRoundMode to FloatingPoint::RoundMode
-        RoundMode fpu_rm = (case (rm)
-                RNE:        Rnd_Nearest_Even;
-                RTZ:        Rnd_Zero;
-                RDN:        Rnd_Minus_Inf;
-                RUP:        Rnd_Plus_Inf;
-                RMM:        Rnd_Nearest_Away_Zero;
-                RDyn:       Rnd_Nearest_Even;
-                default:    Rnd_Nearest_Even;
-            endcase);
-
-        FpuResult fpu_result = execFpuSimple(fpu_inst, rm, rVal1, rVal2);
-
-        if (fpu_inst.precision == Single) begin
-            // single precision
-            Float in1 = unpack(rVal1[31:0]);
-            Float in2 = unpack(rVal2[31:0]);
-            Float in3 = unpack(rVal3[31:0]);
-            Float dst = unpack(0);
-            Maybe#(Bit#(64)) full_dst = Invalid;
-            Exception e = unpack(0);
-            let fpu_f = fpu_inst.func;
-            // Fpu Decoding
-            case (fpu_f)
-                // pipeline instructions
-                FAdd:   float_add.request.put(tuple3(in1, in2, fpu_rm));
-                FSub:   float_add.request.put(tuple3(in1, -in2, fpu_rm));
-                FMul:   float_mult.request.put(tuple3(in1, in2, fpu_rm));
-`ifndef NO_FDIV
-                FDiv:   float_div.request.put(tuple3(in1, in2, fpu_rm));
-`endif
-`ifndef NO_FSQRT
-                FSqrt:  float_sqrt.request.put(tuple2(in1, fpu_rm));
-`endif
-                FMAdd:  float_fma.request.put(tuple4(tagged Valid in3, in1, in2, fpu_rm));
-                FMSub:  float_fma.request.put(tuple4(tagged Valid (-in3), in1, in2, fpu_rm));
-                FNMSub: float_fma.request.put(tuple4(tagged Valid (-in3), in1, in2, fpu_rm));
-                FNMAdd: float_fma.request.put(tuple4(tagged Valid in3, in1, in2, fpu_rm));
-            endcase
-        end else if (fpu_inst.precision == Double) begin
-            // double precision
-            Double in1 = unpack(rVal1);
-            Double in2 = unpack(rVal2);
-            Double in3 = unpack(rVal3);
-            Double dst = unpack(0);
-            Maybe#(Bit#(64)) full_dst = Invalid;
-            Exception e = unpack(0);
-            let fpu_f = fpu_inst.func;
-            // Fpu Decoding
-            case (fpu_f)
-                // pipeline instructions
-                FAdd:   double_add.request.put(tuple3(in1, in2, fpu_rm));
-                FSub:   double_add.request.put(tuple3(in1, -in2, fpu_rm));
-                FMul:   double_mult.request.put(tuple3(in1, in2, fpu_rm));
-`ifndef NO_FDIV
-                FDiv:   double_div.request.put(tuple3(in1, in2, fpu_rm));
-`endif
-`ifndef NO_FSQRT
-                FSqrt:  double_sqrt.request.put(tuple2(in1, fpu_rm));
-`endif
-                FMAdd:  double_fma.request.put(tuple4(tagged Valid in3, in1, in2, fpu_rm));
-                FMSub:  double_fma.request.put(tuple4(tagged Valid (-in3), in1, in2, fpu_rm));
-                FNMSub: double_fma.request.put(tuple4(tagged Valid (-in3), in1, in2, fpu_rm));
-                FNMAdd: double_fma.request.put(tuple4(tagged Valid in3, in1, in2, fpu_rm));
-            endcase
-        end
-        fpu_exec_fifo.enq(fpu_result);
-        fpu_func_fifo.enq(fpu_inst);
-    endmethod
-
-    method Bool         notEmpty = fpu_exec_fifo_out.notEmpty;
-    // output
-    method Bool       result_rdy = fpu_exec_fifo_out.notEmpty;
-    method FpuResult result_data = fpu_exec_fifo_out.first;
-    method Action     result_deq = fpu_exec_fifo_out.deq;
-endmodule
-
-`else
-
-(* synthesize, gate_all_clocks *)
-module mkFpuExecPipeline(FpuExec);
-    FIFOF#(FpuResult) fpu_exec_fifo <- mkFIFOF;
-
-    method Action exec(FpuInst fpu_inst, RVRoundMode rm, Bit#(64) rVal1, Bit#(64) rVal2, Bit#(64) rVal3);
-        $fdisplay(stderr, "[ERROR] mkFpuExecDummy is in use");
-        // don't do the function...
-        FpuResult res = unpack(0);
-        // ...and enqueue it into fpu_exec_fifo
-        fpu_exec_fifo.enq(res);
-    endmethod
-
-    method Bool         notEmpty = fpu_exec_fifo.notEmpty;
-    // output
-    method Bool       result_rdy = fpu_exec_fifo.notEmpty;
-    method FpuResult result_data = fpu_exec_fifo.first;
-    method Action     result_deq = fpu_exec_fifo.deq;
-endmodule
-
-`endif
+////////////////////////////////////////////////////////////////////////////
+// Fused multiply-add
+////////////////////////////////////////////////////////////////////////////
 
 typedef struct {
-  FpuFunc   f;
-  Bit#(33)  rv1;
-  Bit#(33)  rv2;
-  Bool      lt;
-  Bool      eq;
-  Bool      gt;
-  Bool      cmp_invalid;
-  Bit#(10)  cls;
-  Bit#(32)  int_res;
-  Bit#(3)   int_exc;
-  Bit#(33)  float_res;
-  Exception float_exc;
-} FloatSimpleMid deriving (Bits, Eq, FShow);
+  Bit#(2)      op;
+  Bit#(3)      rm;
+  Bit#(RecFpW) a;
+  Bit#(RecFpW) b;
+  Bit#(RecFpW) c;
+} MulAddArg deriving (Bits, Eq, FShow);
 
-function FloatSimpleMid execFloatSimpleConv(FpuFunc fpu_f, Bit#(3) fpu_rm,
-                                            Bit#(33) rv1, Bit#(33) rv2);
-    CompareRecFN#(8, 24) compareRecF32 = mkCompareRecFN;
-    ClassifyRecFN#(8, 24) classifyRecF32 = classifyRecFN;
-    function INToRecFN#(32, 8, 24) iN32ToRecF32(Bool signedOp) = mkINToRecFN(signedOp);
-    function RecFNToIN#(8, 24, 32) recF32ToIN32(Bool signedOp) = mkRecFNToIN(signedOp);
+typedef struct {
+  Bit#(3)                        rm;
+  Bit#(FpSigW)                   mulA;
+  Bit#(FpSigW)                   mulB;
+  Bit#(TAdd#(FpSigW, FpSigW))    mulC;
+  MulAddInterIo#(FpExpW, FpSigW) inter;
+} MulAddPre deriving (Bits, Eq);
+
+typedef struct {
+  Bit#(3)                               rm;
+  Bit#(TAdd#(TAdd#(FpSigW, FpSigW), 1)) prod;
+  MulAddInterIo#(FpExpW, FpSigW)        inter;
+} MulAddProd deriving (Bits, Eq);
+
+// op[1] negates the product and op[0] negates the addend, so a*b+c, a*b-c,
+// -(a*b)+c and -(a*b)-c are one encoding apart.  The boundary between premul
+// and postmul is the one the reference Verilog leaves between
+// mulAddRecFNToRaw_preMul and mulAddRecFNToRaw_postMul.
+(* synthesize *)
+module mkFloatMulAdd(Server#(MulAddArg, FpuRecResult));
+  FIFOF#(MulAddArg)    argQ  <- mkFIFOF;
+  FIFOF#(MulAddPre)    preQ  <- mkFIFOF;
+  FIFOF#(MulAddProd)   prodQ <- mkFIFOF;
+  FIFOF#(FpuRecResult) outQ  <- mkFIFOF;
+
+  RoundRawFNToRecFN#(FpExpW, FpSigW) roundRawToRecF32 = mkRoundRawFNToRecFN(0);
+
+  (* fire_when_enabled *)
+  rule premul;
+    let x <- toGet(argQ).get;
+    RawFloat#(FpExpW, FpSigW) rawA = rawFloatFromRecFN(x.a);
+    RawFloat#(FpExpW, FpSigW) rawB = rawFloatFromRecFN(x.b);
+    RawFloat#(FpExpW, FpSigW) rawC = rawFloatFromRecFN(x.c);
+    match {.mulA, .mulB, .mulC, .inter} =
+      mulAddRawFN_preMul(x.op, rawA, rawB, rawC);
+    preQ.enq(MulAddPre {
+      rm: x.rm, mulA: mulA, mulB: mulB, mulC: mulC, inter: inter
+    });
+  endrule
+
+  (* fire_when_enabled *)
+  rule multiply;
+    let x <- toGet(preQ).get;
+    Bit#(TAdd#(FpSigW, FpSigW)) mulProd =
+      zeroExtend(x.mulA) * zeroExtend(x.mulB);
+    Bit#(TAdd#(TAdd#(FpSigW, FpSigW), 1)) mulAddResult =
+      zeroExtend(mulProd) + zeroExtend(x.mulC);
+    prodQ.enq(MulAddProd { rm: x.rm, prod: mulAddResult, inter: x.inter });
+  endrule
+
+  (* fire_when_enabled *)
+  rule postmul;
+    let x <- toGet(prodQ).get;
+    match {.invalidExc, .rawOut} =
+      mulAddRawFN_postMul(x.inter, x.prod, x.rm);
+    match {.rec, .exc} =
+      roundRawToRecF32(invalidExc, False, rawOut, x.rm, tininess_afterRounding);
+    outQ.enq(FpuRecResult { data: rec, fflags: pack(exc) });
+  endrule
+
+  interface Put request = toPut(argQ);
+  interface Get response = toGet(outQ);
+endmodule
+
+////////////////////////////////////////////////////////////////////////////
+// Divide and square root
+////////////////////////////////////////////////////////////////////////////
+
+typedef struct {
+  Bool         sqrtOp;
+  Bit#(3)      rm;
+  Bit#(RecFpW) a;
+  Bit#(RecFpW) b;
+} DivSqrtArg deriving (Bits, Eq, FShow);
+
+// A digit recurrence producing one bit of result per cycle, with one
+// operation in flight.  The output register is filled the cycle the core
+// reports a result and the next operation only starts once it is free, which
+// is what keeps that result from being overwritten.
+(* synthesize *)
+module mkFloatDivSqrt(Server#(DivSqrtArg, FpuRecResult));
+  DivSqrtRecFN_small#(FpExpW, FpSigW) core <- mkDivSqrtRecFN_small(0);
+
+  // Unguarded: `req` is always_enabled, so the rule that drives it may not
+  // pick up an implicit condition from the argument queue.
+  FIFOF#(DivSqrtArg) argQ <- mkUGFIFOF;
+  Reg#(Maybe#(FpuRecResult)) outSlot[2] <- mkCReg(2, tagged Invalid);
+
+  (* fire_when_enabled, no_implicit_conditions *)
+  rule drive;
+    Bool done = core.outValid_div || core.outValid_sqrt;
+    Bool start = core.inReady && !done && argQ.notEmpty && !isValid(outSlot[1]);
+
+    let x = argQ.first;
+    core.req(start, x.sqrtOp, x.a, x.b, x.rm);
+    if (start) argQ.deq;
+
+    if (done) begin
+      match {.rec, .exc} = core.result(tininess_afterRounding);
+      FpuRecResult res = FpuRecResult { data: rec, fflags: pack(exc) };
+      outSlot[1] <= tagged Valid res;
+    end
+  endrule
+
+  interface Put request;
+    method Action put(DivSqrtArg x) if (argQ.notFull);
+      argQ.enq(x);
+    endmethod
+  endinterface
+
+  interface Get response;
+    method ActionValue#(FpuRecResult) get if (isValid(outSlot[0]));
+      outSlot[0] <= tagged Invalid;
+      return fromMaybe(?, outSlot[0]);
+    endmethod
+  endinterface
+endmodule
+
+////////////////////////////////////////////////////////////////////////////
+// Comparison, classification, sign injection, moves and integer conversion
+////////////////////////////////////////////////////////////////////////////
+
+// iv1 is rs1 before recoding.  The moves have to reproduce their source bit
+// for bit and the integer-to-float conversions read an integer, so those
+// three take iv1 while everything else works on the recoded operands.
+typedef struct {
+  FpuFunc      f;
+  Bit#(3)      rm;
+  Bit#(RecFpW) rv1;
+  Bit#(RecFpW) rv2;
+  Bit#(32)     iv1;
+} SimpleArg deriving (Bits, Eq, FShow);
+
+(* noinline *)
+function FpuRecResult execFloatSimple(FpuFunc fpu_f, Bit#(3) fpu_rm, Bit#(RecFpW) rv1, Bit#(RecFpW) rv2, Bit#(32) iv1);
+    CompareRecFN#(FpExpW, FpSigW) compareRecF32 = mkCompareRecFN;
+    ClassifyRecFN#(FpExpW, FpSigW) classifyRecF32 = classifyRecFN;
+    function INToRecFN#(32, FpExpW, FpSigW) iN32ToRecF32(Bool signedOp) = mkINToRecFN(signedOp);
+    function RecFNToIN#(FpExpW, FpSigW, 32) recF32ToIN32(Bool signedOp) = mkRecFNToIN(signedOp);
+
+    Bit#(RecFpW) dst = ?;
+    Exception e = unpack(0);
+
+    RawFloat#(FpExpW, FpSigW) raw1 = rawFloatFromRecFN(rv1);
+    RawFloat#(FpExpW, FpSigW) raw2 = rawFloatFromRecFN(rv2);
 
     match CompareRes {lt: .lt, eq: .eq, gt: .gt, fflags: Exception {invalid_op: .cmp_invalid}} = compareRecF32(rv1, rv2, False);
     match {.int_res, .int_exc} = recF32ToIN32(fpu_f == FCvt_WF, rv1, fpu_rm);
-    match {.float_res, .float_exc} = iN32ToRecF32(fpu_f == FCvt_FW, truncate(rv1), fpu_rm, 0);
+    match {.float_res, .float_exc} = iN32ToRecF32(fpu_f == FCvt_FW, iv1, fpu_rm, tininess_afterRounding);
 
-    return FloatSimpleMid {
-      f: fpu_f, rv1: rv1, rv2: rv2,
-      lt: lt, eq: eq, gt: gt, cmp_invalid: cmp_invalid,
-      cls: classifyRecF32(rv1),
-      int_res: int_res, int_exc: int_exc,
-      float_res: float_res, float_exc: float_exc
-    };
-endfunction
-
-function FpuResult execFloatSimpleSelect(FloatSimpleMid m);
-    FpuResult fpu_result = ?;
-    FNFromRecFN#(8, 24) recF32ToF32 = fNFromRecFN;
-    FpuFunc fpu_f = m.f;
-
-    Bit#(33) dst = ?;
-    Exception e = unpack(0);
-    Bool noUncode = case (fpu_f)
-        FEq, FLt, FLe, FClass: True;
-        FMv_XF: True;
-        FMv_FX: True;
-        FCvt_WF, FCvt_WUF: True;
-        default: False;
-    endcase;
-
+    // Fpu Decoding
     case (fpu_f)
+        // combinational instructions
         FMin, FMax: begin
-            e.invalid_op = m.cmp_invalid;
-            let sel = unpack(pack(fpu_f)[1]) ? m.lt : m.gt;
-            dst = sel ? m.rv2 : m.rv1;
+            e.invalid_op = cmp_invalid;
+            Bool isMax = unpack(pack(fpu_f)[1]);
+            // lt and gt are already false when either operand is a NaN, so
+            // the NaN term below does not overlap the ordinary one.
+            Bool sel = isMax ? lt : gt;
+            // Zeros compare equal, so pick by sign to keep min(-0,+0) = -0
+            // and max(-0,+0) = +0.
+            Bool zsel = isMax ? (raw1.sign && !raw2.sign) : (raw2.sign && !raw1.sign);
+            Bool pickRv2 = (raw1.isNaN && !raw2.isNaN) || sel || (eq && zsel);
+            dst = (raw1.isNaN && raw2.isNaN) ? recF32_canonicalNaN
+                                             : (pickRv2 ? rv2 : rv1);
         end
         FEq, FLt, FLe: begin
-            e.invalid_op = m.cmp_invalid;
-            dst = zeroExtend(~pack(fpu_f)[0] & pack(m.eq) | ~pack(fpu_f)[1] & pack(m.lt));
+            // FEq is quiet; FLt and FLe signal on any NaN.
+            e.invalid_op = cmp_invalid ||
+              ((fpu_f != FEq) && (raw1.isNaN || raw2.isNaN));
+            dst = zeroExtend(~pack(fpu_f)[0] & pack(eq) | ~pack(fpu_f)[1] & pack(lt));
         end
-        FClass: dst = zeroExtend(m.cls);
+        // CLASS functions
+        FClass: dst = zeroExtend(classifyRecF32(rv1));
+        // Sign Injection
         FSgnj, FSgnjn, FSgnjx: begin
-            dst = m.rv1;
+            dst = rv1;
             let x =
-              unpack(pack(fpu_f)[1]) ?
+              unpack(pack(fpu_f)[1]) ? // FSgnjn
               1'b1 :
-              pack(fpu_f)[3] & m.rv1[32];
-            dst[32] = x ^ m.rv2[32];
+              pack(fpu_f)[3] & rv1[32]; // fpu_f[3] == 1 → FSgnjx
+            dst[32] = x ^ rv2[32];
         end
-        FMv_XF, FMv_FX: dst = m.rv1;
+        // Float → Bits, Bits → Float
+        FMv_XF, FMv_FX: dst = zeroExtend(iv1);
+        // Float → Int
         FCvt_WF, FCvt_WUF: begin
-            dst = zeroExtend(m.int_res);
-            e.invalid_op = unpack(m.int_exc[2]);
-            e.overflow = unpack(m.int_exc[1]);
-            e.inexact = unpack(m.int_exc[0]);
+            dst = zeroExtend(int_res);
+            // A result that does not fit is clipped and reported as invalid,
+            // not as an overflow.
+            e.invalid_op = unpack(int_exc[2] | int_exc[1]);
+            e.inexact = unpack(int_exc[0]);
         end
+        // Int → Float
         FCvt_FW, FCvt_FWU: begin
-            dst = m.float_res;
-            e = m.float_exc;
+            dst = float_res;
+            e = float_exc;
         end
     endcase
-
-    Bit#(32) data = noUncode ? truncate(dst) : recF32ToF32(dst);
-    fpu_result.data = zeroExtend(data);
-    fpu_result.fflags = pack(e);
-    return fpu_result;
+    return FpuRecResult { data: dst, fflags: pack(e) };
 endfunction
 
 (* synthesize *)
-module mkFloatSimple (Server#(Tuple4#(FpuFunc, RVRoundMode, Bit#(32), Bit#(32)), FpuResult));
-  FIFOF#(Tuple4#(FpuFunc, Bit#(3), Bit#(33), Bit#(33))) fpu_arg_fifo <- mkFIFOF;
-  FIFOF#(FloatSimpleMid) fpu_mid_fifo <- mkFIFOF;
-  FIFOF#(FpuResult) fpu_exec_fifo <- mkFIFOF;
-  RecFNFromFN#(8, 24) f32ToRecF32 = recFNFromFN;
+module mkFloatSimple (Server#(SimpleArg, FpuRecResult));
+  FIFOF#(SimpleArg)    argQ <- mkFIFOF;
+  FIFOF#(FpuRecResult) outQ <- mkFIFOF;
 
   (* fire_when_enabled *)
-  rule exec_convert;
-    match {.fpu_f, .fpu_rm, .rVal1, .rVal2} <- toGet(fpu_arg_fifo).get;
-    fpu_mid_fifo.enq(execFloatSimpleConv(fpu_f, fpu_rm, rVal1, rVal2));
+  rule exec_simple;
+    let x <- toGet(argQ).get;
+    outQ.enq(execFloatSimple(x.f, x.rm, x.rv1, x.rv2, x.iv1));
   endrule
 
-  (* fire_when_enabled *)
-  rule exec_select;
-    let m <- toGet(fpu_mid_fifo).get;
-    fpu_exec_fifo.enq(execFloatSimpleSelect(m));
-  endrule
-
-  interface Put request;
-    method Action put(Tuple4#(FpuFunc, RVRoundMode, Bit#(32), Bit#(32)) in);
-      match {.fpu_f, .rm, .rVal1, .rVal2} = in;
-
-      Bit#(3) fpu_rm = case (rm)
-        RNE:     round_near_even;
-        RTZ:     round_minMag;
-        RDN:     round_min;
-        RUP:     round_max;
-        RMM:     round_near_maxMag;
-        default: round_near_even;
-      endcase;
-      Bool noRecode = case (fpu_f)
-        FMv_XF: True;
-        FMv_FX: True;
-        FCvt_FW, FCvt_FWU: True;
-        default: False;
-      endcase;
-
-      Bit#(33) rv1 = noRecode ? zeroExtend(rVal1) : (f32ToRecF32(rVal1));
-      Bit#(33) rv2 = noRecode ? zeroExtend(rVal2) : (f32ToRecF32(rVal2));
-      fpu_arg_fifo.enq(tuple4(fpu_f, fpu_rm, rv1, rv2));
-    endmethod
-  endinterface
-  interface Get response = toGet(fpu_exec_fifo);
+  interface Put request = toPut(argQ);
+  interface Get response = toGet(outQ);
 endmodule
+
+////////////////////////////////////////////////////////////////////////////
+// Vector wrapper
+////////////////////////////////////////////////////////////////////////////
 
 typedef struct {
   FpuFunc f;
@@ -1187,24 +290,13 @@ typedef struct {
   Vector#(n, Bit#(32)) v3;
 } FpuReq#(numeric type n) deriving (Bits, Eq, FShow);
 
-function
-  Module#(Vector#(ThreadNum, Server#(Tuple4#(FpuFunc, RVRoundMode, Bit#(32), Bit#(32)), FpuResult)))
-  mkVectorFloatSimple = replicateM(mkFloatSimple);
-function
-  Module#(Vector#(ThreadNum, Server#(Tuple3#(Float, Float, RoundMode), Tuple2#(Float, Exception))))
-  mkVectorFloatAdd = replicateM(mkFloatAdd);
-function
-  Module#(Vector#(ThreadNum, Server#(Tuple3#(Float, Float, RoundMode), Tuple2#(Float, Exception))))
-  mkVectorFloatMult = replicateM(mkFloatMult);
-function
-  Module#(Vector#(ThreadNum, Server#(Tuple3#(Float, Float, RoundMode), Tuple2#(Float, Exception))))
-  mkVectorFloatDiv = replicateM(mkFloatDiv);
-function
-  Module#(Vector#(ThreadNum, Server#(Tuple2#(Float, RoundMode), Tuple2#(Float, Exception))))
-  mkVectorFloatSqrt = replicateM(mkFloatSqrt);
-function
-  Module#(Vector#(ThreadNum, Server#(Tuple4#(Maybe#(Float), Float, Float, RoundMode), Tuple2#(Float, Exception))))
-  mkVectorFloatFMA = replicateM(mkFloatFMA);
+typedef struct {
+  FpuFunc                      f;
+  RVRoundMode                  rm;
+  Vector#(ThreadNum, Bit#(32)) v1;
+  Vector#(ThreadNum, Bit#(32)) v2;
+  Vector#(ThreadNum, Bit#(32)) v3;
+} FpuIssue deriving (Bits, Eq, FShow);
 
 interface VectorFpu;
     method Action       exec(FpuFunc f, RVRoundMode rm, Vector#(ThreadNum, Bit#(32)) rVal1, Vector#(ThreadNum, Bit#(32)) rVal2, Vector#(ThreadNum, Bit#(32)) rVal3);
@@ -1223,82 +315,102 @@ endmodule
 
 (* synthesize *)
 module mkVectorFpu(VectorFpu);
-    Fifo#(8, FpuFunc) fpu_func_fifo <- mkCFFifo(True, True); // in parallel with pipelined FPUs
-    Fifo#(8, Vector#(ThreadNum, FpuResult)) fpu_exec_fifo_out <- mkFpuExecFifoOut; // all pipelined FPUs dequeue into this
+    FIFOF#(FpuIssue) issueQ <- mkFIFOF;
+    Fifo#(8, FpuFunc) fpu_func_fifo <- mkCFFifo(True, True); // records issue order
+    Fifo#(8, Vector#(ThreadNum, FpuResult)) fpu_exec_fifo_out <- mkFpuExecFifoOut; // all datapaths dequeue into this
 
-    // Pipelined units
-    // Float
-    let float_simple <- mkVectorFloatSimple;
-    let float_add <- mkVectorFloatAdd;
-    let float_mult <- mkVectorFloatMult;
-    let float_div <- mkVectorFloatDiv;
-    let float_sqrt <- mkVectorFloatSqrt;
-    let float_fma <- mkVectorFloatFMA;
+    Vector#(ThreadNum, Server#(MulAddArg, FpuRecResult))  float_mulAdd  <- replicateM(mkFloatMulAdd);
+    Vector#(ThreadNum, Server#(DivSqrtArg, FpuRecResult)) float_divSqrt <- replicateM(mkFloatDivSqrt);
+    Vector#(ThreadNum, Server#(SimpleArg, FpuRecResult))  float_simple  <- replicateM(mkFloatSimple);
+
+    RecFNFromFN#(FpExpW, FpSigW) f32ToRecF32 = recFNFromFN;
+    FNFromRecFN#(FpExpW, FpSigW) recF32ToF32 = fNFromRecFN;
+
+    rule dispatch;
+        let x <- toGet(issueQ).get;
+
+        Bit#(3) fpu_rm = case (x.rm)
+            RNE:     round_near_even;
+            RTZ:     round_minMag;
+            RDN:     round_min;
+            RUP:     round_max;
+            RMM:     round_near_maxMag;
+            default: round_near_even;
+        endcase;
+
+        // op[1] negates the product, op[0] negates the addend.
+        Bit#(2) fmaOp = case (x.f)
+            FSub:    2'b01;
+            FMSub:   2'b01;
+            FNMSub:  2'b10;
+            FNMAdd:  2'b11;
+            default: 2'b00; // FAdd, FMul, FMAdd
+        endcase;
+        Bool isAddSub = (x.f == FAdd) || (x.f == FSub);
+        Bool isMul = (x.f == FMul);
+
+        // single precision
+        // Fpu Decoding
+        for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1) begin
+            // An add is 1.0*v1 (+/-) v2 and a multiply is v1*v2 plus a zero
+            // carrying the product's sign, which is what makes the sign of a
+            // zero product come out right.  Everything else leaves the three
+            // sources alone, so one mux ahead of the recoders covers all of
+            // them.
+            Bit#(1) prodSign = x.v1[i][31] ^ x.v2[i][31];
+            Bit#(32) src1 = isAddSub ? f32_one : x.v1[i];
+            Bit#(32) src2 = isAddSub ? x.v1[i] : x.v2[i];
+            Bit#(32) src3 = isAddSub ? x.v2[i] :
+                            isMul    ? {prodSign, 31'b0} :
+                                       x.v3[i];
+            Bit#(RecFpW) rec1 = f32ToRecF32(src1);
+            Bit#(RecFpW) rec2 = f32ToRecF32(src2);
+            Bit#(RecFpW) rec3 = f32ToRecF32(src3);
+            case (x.f)
+                FAdd, FSub, FMul, FMAdd, FMSub, FNMSub, FNMAdd:
+                        float_mulAdd[i].request.put(MulAddArg {
+                          op: fmaOp, rm: fpu_rm, a: rec1, b: rec2, c: rec3 });
+                FDiv, FSqrt:
+                        float_divSqrt[i].request.put(DivSqrtArg {
+                          sqrtOp: (x.f == FSqrt), rm: fpu_rm,
+                          a: rec1, b: rec2 });
+                default: float_simple[i].request.put(SimpleArg {
+                          f: x.f, rm: fpu_rm, rv1: rec1, rv2: rec2, iv1: src1 });
+            endcase
+        end
+        fpu_func_fifo.enq(x.f);
+    endrule
 
     rule finish;
         let fpu_f = fpu_func_fifo.first;
         fpu_func_fifo.deq;
 
+        Bool floatOut = case (fpu_f)
+            FEq, FLt, FLe, FClass: False;
+            FMv_XF, FMv_FX: False;
+            FCvt_WF, FCvt_WUF: False;
+            default: True;
+        endcase;
+
         Vector#(ThreadNum, FpuResult) exec_out;
         // Fpu Decoding
         for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1) begin
-            Float out = unpack(0);
-            Exception exc = unpack(0);
+            FpuRecResult out = unpack(0);
             case (fpu_f)
-                // pipeline instructions
-                FAdd:   begin {out, exc} <- float_add[i].response.get; end
-                FSub:   begin {out, exc} <- float_add[i].response.get; end
-                FMul:   begin {out, exc} <- float_mult[i].response.get; end
-                FDiv:   begin {out, exc} <- float_div[i].response.get; end
-                FSqrt:  begin {out, exc} <- float_sqrt[i].response.get; end
-                FMAdd:  begin {out, exc} <- float_fma[i].response.get; end
-                FMSub:  begin {out, exc} <- float_fma[i].response.get; end
-                FNMSub: begin {out, exc} <- float_fma[i].response.get; out = -out; end
-                FNMAdd: begin {out, exc} <- float_fma[i].response.get; out = -out; end
-                default: begin let x <- float_simple[i].response.get; out = unpack(truncate(x.data)); exc = unpack(x.fflags); end
+                FAdd, FSub, FMul, FMAdd, FMSub, FNMSub, FNMAdd:
+                        begin out <- float_mulAdd[i].response.get; end
+                FDiv, FSqrt:
+                        begin out <- float_divSqrt[i].response.get; end
+                default: begin out <- float_simple[i].response.get; end
             endcase
-            // canonicalize NaNs
-            if (isNaN(out)) out = canonicalNaN;
-            // update data and exception in exec_out
-            exec_out[i].data = zeroExtend(pack(out));
-            exec_out[i].fflags = pack(exc);
+            Bit#(32) data = floatOut ? recF32ToF32(out.data) : truncate(out.data);
+            exec_out[i] = FpuResult { data: zeroExtend(data), fflags: out.fflags };
         end
         fpu_exec_fifo_out.enq(exec_out);
     endrule
 
     method Action exec(FpuFunc fpu_f, RVRoundMode rm, Vector#(ThreadNum, Bit#(32)) rVal1, Vector#(ThreadNum, Bit#(32)) rVal2, Vector#(ThreadNum, Bit#(32)) rVal3);
-        // Convert the Risc-V RVRoundMode to FloatingPoint::RoundMode
-        RoundMode fpu_rm = (case (rm)
-                RNE:        Rnd_Nearest_Even;
-                RTZ:        Rnd_Zero;
-                RDN:        Rnd_Minus_Inf;
-                RUP:        Rnd_Plus_Inf;
-                RMM:        Rnd_Nearest_Away_Zero;
-                RDyn:       Rnd_Nearest_Even;
-                default:    Rnd_Nearest_Even;
-            endcase);
-
-        // single precision
-        // Fpu Decoding
-        for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1) begin
-            Float in1 = unpack(rVal1[i]);
-            Float in2 = unpack(rVal2[i]);
-            Float in3 = unpack(rVal3[i]);
-            case (fpu_f)
-                // pipeline instructions
-                FAdd:   float_add[i].request.put(tuple3(in1, in2, fpu_rm));
-                FSub:   float_add[i].request.put(tuple3(in1, -in2, fpu_rm));
-                FMul:   float_mult[i].request.put(tuple3(in1, in2, fpu_rm));
-                FDiv:   float_div[i].request.put(tuple3(in1, in2, fpu_rm));
-                FSqrt:  float_sqrt[i].request.put(tuple2(in1, fpu_rm));
-                FMAdd:  float_fma[i].request.put(tuple4(tagged Valid in3, in1, in2, fpu_rm));
-                FMSub:  float_fma[i].request.put(tuple4(tagged Valid (-in3), in1, in2, fpu_rm));
-                FNMSub: float_fma[i].request.put(tuple4(tagged Valid (-in3), in1, in2, fpu_rm));
-                FNMAdd: float_fma[i].request.put(tuple4(tagged Valid in3, in1, in2, fpu_rm));
-                default: float_simple[i].request.put(tuple4(fpu_f, rm, rVal1[i], rVal2[i]));
-            endcase
-        end
-        fpu_func_fifo.enq(fpu_f);
+        issueQ.enq(FpuIssue { f: fpu_f, rm: rm, v1: rVal1, v2: rVal2, v3: rVal3 });
     endmethod
 
     method notEmpty = fpu_exec_fifo_out.notEmpty;
@@ -1307,4 +419,3 @@ module mkVectorFpu(VectorFpu);
     method result_data = fpu_exec_fifo_out.first;
     method result_deq = fpu_exec_fifo_out.deq;
 endmodule
-

@@ -288,6 +288,8 @@ module mkCore(Core);
   for (Integer i = 0; i < 2; i = i + 1) begin
     (* fire_when_enabled *)
     rule pull_WB;
+      if (printDebug)
+        $display("pull_WB%0d", i);
       wbs[i].enq(rfIn[i].first);
       rfIn[i].deq;
     endrule

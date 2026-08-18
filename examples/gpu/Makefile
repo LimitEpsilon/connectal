@@ -13,6 +13,7 @@ BSVFILES += \
 BSVPATH += / \
 	src/ \
 	src/includes \
+	src/includes/hardfloat \
 	$(CONNECTALDIR)/bsv \
 	$(PLATFORMDIR)/bsvlib \
 	$(MIGDIR) \

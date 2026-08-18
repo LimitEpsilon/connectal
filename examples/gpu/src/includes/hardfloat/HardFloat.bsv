@@ -107,7 +107,8 @@ function Bool andR(Bit#(w) in) = unpack(&in);
 function Bit#(TDiv#(w, d)) orReduceBy(Bit#(d) ghost, Bit#(w) in) // TDiv#(w, d) = ⌈w / d⌉
   provisos(Add#(1, _, d)); // you can't divide by zero
   Integer vd = valueOf(d);
-  function Bit#(d) g(Integer i) = in[(i+1)*vd-1 : i*vd]; // gen
+  Bit#(TMax#(w, TMul#(d, TDiv#(w, d)))) in_ = zeroExtend(in);
+  function Bit#(d) g(Integer i) = in_[(i+1)*vd-1 : i*vd]; // gen
   return pack(map(orR, genWith(g)));
 endfunction
 
@@ -757,4 +758,3 @@ function CompareRecFN#(expWidth, sigWidth) mkCompareRecFN
 
   return f;
 endfunction
-
