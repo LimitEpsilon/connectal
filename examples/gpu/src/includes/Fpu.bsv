@@ -1046,72 +1046,88 @@ endmodule
 
 `endif
 
-(* noinline *)
-function FpuResult execFloatSimple(FpuFunc fpu_f, Bit#(3) fpu_rm, Bit#(33) rv1, Bit#(33) rv2);
-    FpuResult fpu_result = ?;
+typedef struct {
+  FpuFunc   f;
+  Bit#(33)  rv1;
+  Bit#(33)  rv2;
+  Bool      lt;
+  Bool      eq;
+  Bool      gt;
+  Bool      cmp_invalid;
+  Bit#(10)  cls;
+  Bit#(32)  int_res;
+  Bit#(3)   int_exc;
+  Bit#(33)  float_res;
+  Exception float_exc;
+} FloatSimpleMid deriving (Bits, Eq, FShow);
 
+function FloatSimpleMid execFloatSimpleConv(FpuFunc fpu_f, Bit#(3) fpu_rm,
+                                            Bit#(33) rv1, Bit#(33) rv2);
     CompareRecFN#(8, 24) compareRecF32 = mkCompareRecFN;
     ClassifyRecFN#(8, 24) classifyRecF32 = classifyRecFN;
     function INToRecFN#(32, 8, 24) iN32ToRecF32(Bool signedOp) = mkINToRecFN(signedOp);
     function RecFNToIN#(8, 24, 32) recF32ToIN32(Bool signedOp) = mkRecFNToIN(signedOp);
-    FNFromRecFN#(8, 24) recF32ToF32 = fNFromRecFN;
-
-    // single precision
-    Bit#(33) dst = ?;
-    Exception e = unpack(0);
-    Bool noUncode = case (fpu_f)
-        FEq, FLt, FLe, FClass: True;
-        // Float -> Bits
-        FMv_XF: True;
-        // Bits -> Float
-        FMv_FX: True;
-        // Float -> Int
-        FCvt_WF, FCvt_WUF: True;
-        default: False;
-    endcase;
 
     match CompareRes {lt: .lt, eq: .eq, gt: .gt, fflags: Exception {invalid_op: .cmp_invalid}} = compareRecF32(rv1, rv2, False);
     match {.int_res, .int_exc} = recF32ToIN32(fpu_f == FCvt_WF, rv1, fpu_rm);
     match {.float_res, .float_exc} = iN32ToRecF32(fpu_f == FCvt_FW, truncate(rv1), fpu_rm, 0);
 
-    // Fpu Decoding
+    return FloatSimpleMid {
+      f: fpu_f, rv1: rv1, rv2: rv2,
+      lt: lt, eq: eq, gt: gt, cmp_invalid: cmp_invalid,
+      cls: classifyRecF32(rv1),
+      int_res: int_res, int_exc: int_exc,
+      float_res: float_res, float_exc: float_exc
+    };
+endfunction
+
+function FpuResult execFloatSimpleSelect(FloatSimpleMid m);
+    FpuResult fpu_result = ?;
+    FNFromRecFN#(8, 24) recF32ToF32 = fNFromRecFN;
+    FpuFunc fpu_f = m.f;
+
+    Bit#(33) dst = ?;
+    Exception e = unpack(0);
+    Bool noUncode = case (fpu_f)
+        FEq, FLt, FLe, FClass: True;
+        FMv_XF: True;
+        FMv_FX: True;
+        FCvt_WF, FCvt_WUF: True;
+        default: False;
+    endcase;
+
     case (fpu_f)
-        // combinational instructions
         FMin, FMax: begin
-            e.invalid_op = cmp_invalid;
-            let sel = unpack(pack(fpu_f)[1]) ? lt : gt;
-            dst = sel ? rv2 : rv1;
+            e.invalid_op = m.cmp_invalid;
+            let sel = unpack(pack(fpu_f)[1]) ? m.lt : m.gt;
+            dst = sel ? m.rv2 : m.rv1;
         end
         FEq, FLt, FLe: begin
-            e.invalid_op = cmp_invalid;
-            dst = zeroExtend(~pack(fpu_f)[0] & pack(eq) | ~pack(fpu_f)[1] & pack(lt));
+            e.invalid_op = m.cmp_invalid;
+            dst = zeroExtend(~pack(fpu_f)[0] & pack(m.eq) | ~pack(fpu_f)[1] & pack(m.lt));
         end
-        // CLASS functions
-        FClass: dst = zeroExtend(classifyRecF32(rv1));
-        // Sign Injection
+        FClass: dst = zeroExtend(m.cls);
         FSgnj, FSgnjn, FSgnjx: begin
-            dst = rv1;
+            dst = m.rv1;
             let x =
-              unpack(pack(fpu_f)[1]) ? // FSgnjn
+              unpack(pack(fpu_f)[1]) ?
               1'b1 :
-              pack(fpu_f)[3] & rv1[32]; // fpu_f[3] == 1 → FSgnjx
-            dst[32] = x ^ rv2[32];
+              pack(fpu_f)[3] & m.rv1[32];
+            dst[32] = x ^ m.rv2[32];
         end
-        // Float → Bits, Bits → Float
-        FMv_XF, FMv_FX: dst = rv1;
-        // Float → Int
+        FMv_XF, FMv_FX: dst = m.rv1;
         FCvt_WF, FCvt_WUF: begin
-            dst = zeroExtend(int_res);
-            e.invalid_op = unpack(int_exc[2]);
-            e.overflow = unpack(int_exc[1]);
-            e.inexact = unpack(int_exc[0]);
+            dst = zeroExtend(m.int_res);
+            e.invalid_op = unpack(m.int_exc[2]);
+            e.overflow = unpack(m.int_exc[1]);
+            e.inexact = unpack(m.int_exc[0]);
         end
-        // Int → Float
         FCvt_FW, FCvt_FWU: begin
-            dst = float_res;
-            e = float_exc;
+            dst = m.float_res;
+            e = m.float_exc;
         end
     endcase
+
     Bit#(32) data = noUncode ? truncate(dst) : recF32ToF32(dst);
     fpu_result.data = zeroExtend(data);
     fpu_result.fflags = pack(e);
@@ -1121,13 +1137,20 @@ endfunction
 (* synthesize *)
 module mkFloatSimple (Server#(Tuple4#(FpuFunc, RVRoundMode, Bit#(32), Bit#(32)), FpuResult));
   FIFOF#(Tuple4#(FpuFunc, Bit#(3), Bit#(33), Bit#(33))) fpu_arg_fifo <- mkFIFOF;
+  FIFOF#(FloatSimpleMid) fpu_mid_fifo <- mkFIFOF;
   FIFOF#(FpuResult) fpu_exec_fifo <- mkFIFOF;
   RecFNFromFN#(8, 24) f32ToRecF32 = recFNFromFN;
 
   (* fire_when_enabled *)
-  rule exec_simple;
+  rule exec_convert;
     match {.fpu_f, .fpu_rm, .rVal1, .rVal2} <- toGet(fpu_arg_fifo).get;
-    fpu_exec_fifo.enq(execFloatSimple(fpu_f, fpu_rm, rVal1, rVal2));
+    fpu_mid_fifo.enq(execFloatSimpleConv(fpu_f, fpu_rm, rVal1, rVal2));
+  endrule
+
+  (* fire_when_enabled *)
+  rule exec_select;
+    let m <- toGet(fpu_mid_fifo).get;
+    fpu_exec_fifo.enq(execFloatSimpleSelect(m));
   endrule
 
   interface Put request;
@@ -1143,11 +1166,8 @@ module mkFloatSimple (Server#(Tuple4#(FpuFunc, RVRoundMode, Bit#(32), Bit#(32)),
         default: round_near_even;
       endcase;
       Bool noRecode = case (fpu_f)
-        // Float -> Bits
         FMv_XF: True;
-        // Bits -> Float
         FMv_FX: True;
-        // Int -> Float
         FCvt_FW, FCvt_FWU: True;
         default: False;
       endcase;

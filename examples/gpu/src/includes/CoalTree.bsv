@@ -27,7 +27,6 @@ interface CoalTree#(numeric type n, numeric type k, type t);
   method Bool notEmpty;
   method Bool getEpoch;
   method Action deq;
-  method Action clear;
   method CoalResp#(n, k, t) first;
 endinterface
 
@@ -55,11 +54,6 @@ instance Coalescer#(1, k, t) provisos (Bits#(t, tSz), FShow#(t));
       rdy[0] <= False;
       epoch <= !epoch;
     endmethod // must be called under if (notEmpty)
-
-    method Action clear;
-      rdy[1] <= False;
-      epoch <= True;
-    endmethod
 
     method first = in;
   endmodule
@@ -150,12 +144,6 @@ instance Coalescer#(n, k, t) provisos (
 
     method Action deq; rdy[0] <= False; endmethod // must be called under if (notEmpty)
 
-    method Action clear;
-      l.clear; r.clear;
-      rdy[2] <= False;
-      epoch[1] <= False;
-    endmethod
-
     method first = out;
   endmodule
 endinstance
@@ -164,19 +152,11 @@ endinstance
 module mkCoalTree#(function t merge (t x, t y)) (CoalTree#(n, k, t))
   provisos (Coalescer#(n, k, t));
   (* hide *) CoalTree#(n, k, t) inner <- mkCoalTree_(merge);
-  (* hide *) Reg#(Bool) noClear <- mkReg(True);
 
-  (* fire_when_enabled, no_implicit_conditions *)
-  rule do_clear(!noClear);
-    inner.clear;
-    noClear <= True;
-  endrule
-
-  method enq if (noClear) = inner.enq;
+  method enq = inner.enq;
   method notEmpty = inner.notEmpty;
   method getEpoch = inner.getEpoch;
-  method deq if (noClear && inner.notEmpty) = inner.deq;
-  method Action clear if (noClear); noClear <= False; endmethod
+  method deq if (inner.notEmpty) = inner.deq;
   method first if (inner.notEmpty) = inner.first;
 endmodule
 

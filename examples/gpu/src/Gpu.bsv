@@ -125,7 +125,6 @@ interface Core;
   method Action putIMemResp(Data resp);
   method Action putCsrResp(CsrResp#(ThreadNum) resp);
   method Action start(SchedResp resp);
-  method Action clear;
 endinterface
 
 // note that I removed guards from first and deq in mkLatencyFifo; check notEmpty explicitly
@@ -162,6 +161,7 @@ module mkCore(Core);
   Vector#(2, Scoreboard) scoreboards <- replicateM(mkScoreboard);
   // from RF, EX, MEM, CSR, START
   let rfIn <- mkRfIn;
+  Vector#(2, FIFOF#(Tuple2#(RFWrReq#(ThreadNum), Bit#(TSub#(LogWarpNum, 1))))) wbs <- replicateM(mkLFIFOF);
   Vector#(2, FIFOF#(RFCont)) rfOut <- replicateM(mkGFIFOF(False, True));
   // from RF
   let schedIn <- mkSchedIn;
@@ -190,16 +190,11 @@ module mkCore(Core);
 
   // signal error
   FIFOF#(void) error <- mkFIFOF;
-  // signal clear
-  Reg#(Bool) noClear <- mkReg(True);
 
   let logWarpNum = valueOf(LogWarpNum);
 
-  // the clear method will drain all warps ready to be issued
-  // we might need to introduce an epoch to distinguish btwn warps being cleared
-  // and warps being submitted
   (* fire_when_enabled *)
-  rule do_IF(noClear && (warps.notFull || iMemReq.notFull));
+  rule do_IF(warps.notFull || iMemReq.notFull);
     Bool selected = warpIn[0].notEmpty || warpIn[1].notEmpty;
     Bool iMemReq_notFull = iMemReq.notFull;
     Bool warps_notEmpty = warps.notEmpty;
@@ -292,14 +287,20 @@ module mkCore(Core);
 
   for (Integer i = 0; i < 2; i = i + 1) begin
     (* fire_when_enabled *)
+    rule pull_WB;
+      wbs[i].enq(rfIn[i].first);
+      rfIn[i].deq;
+    endrule
+
+    (* fire_when_enabled *)
     rule do_RF;
-      if (rfIn[i].notEmpty) begin
+      if (wbs[i].notEmpty) begin
         if (printDebug)
           $display("WB%0d", i);
-        match {.wrReq, .wid} = rfIn[i].first;
+        match {.wrReq, .wid} = wbs[i].first;
         rfs[i].ask(fromWrReq(wrReq), wid);
         scoreboards[i].deq(True, wid, wrReq.rd);
-        rfIn[i].deq;
+        wbs[i].deq;
       end else if (scoreboards[i].notEmpty) begin
         if (printDebug)
           $display("do_RF%0d", i);
@@ -578,26 +579,6 @@ module mkCore(Core);
     call.deq;
   endrule
 
-  (* fire_when_enabled, no_implicit_conditions *)
-  rule do_clear(!noClear);
-    iMemReq.clear;
-    lastIF <= False;
-    warps.clear;
-    ifOut.clear;
-    exOut.clear;
-    mulOut.clear;
-    divOut.clear;
-    for (Integer i = 0; i < 2; i = i + 1) begin
-      rfOut[i].clear;
-      stData[i].clear;
-    end
-    brOut.clear;
-    memOut.clear;
-    csrOut.clear;
-    error.clear;
-    noClear <= True;
-  endrule
-
   method ActionValue#(MemReq#(ThreadNum)) getDMemReq;
     match {.req, .cont} = memIn.first;
     if (!req.write) memOut.enq(cont);
@@ -686,25 +667,6 @@ module mkCore(Core);
     warpIn[lowerWid].iport[4].put(warp);
   endmethod
 
-  method Action clear if (noClear);
-    for (Integer i = 0; i < 2; i = i + 1) begin
-      warpIn[i].clear;
-      rfIn[i].clear;
-    end
-    alus.clear;
-    muls.clear;
-    divs.clear;
-    brus.clear;
-    call.clear;
-    schedIn.clear;
-    exIn.clear;
-    mulIn.clear;
-    divIn.clear;
-    brIn.clear;
-    memIn.clear;
-    csrIn.clear;
-    noClear <= False;
-  endmethod
 endmodule
 
 module mkProc(Proc);

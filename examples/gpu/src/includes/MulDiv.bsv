@@ -43,7 +43,6 @@ interface FMA#(numeric type n);
   method Action enq(UInt#(n) a, UInt#(n) b, UInt#(TAdd#(n, n)) c);
   method UInt#(TAdd#(1, TAdd#(n, n))) first;
   method Action deq;
-  method Action clear;
 endinterface
 
 (* synthesize *)
@@ -52,15 +51,11 @@ module mkBaseFMA (FMA#(MulWidth));
   let computed <- mkReg(False);
   let latched <- mkReg(False);
   RWire#(void) deqReq <- mkRWire;
-  RWire#(void) clearReq <- mkRWire;
   RWire#(FMAReq) enqReq <- mkRWire;
 
   (* fire_when_enabled, no_implicit_conditions *)
   rule canonicalize;
-    if (isValid(clearReq.wget)) begin
-      computed <= False;
-      latched <= False;
-    end else if (enqReq.wget matches tagged Valid .req) begin
+    if (enqReq.wget matches tagged Valid .req) begin
       match FMAReq {a: .a, b: .b, c: .c} = req;
       m.enq(a, b, c);
       computed <= latched;
@@ -82,9 +77,6 @@ module mkBaseFMA (FMA#(MulWidth));
     deqReq.wset(?);
   endmethod
 
-  method Action clear;
-    clearReq.wset(?);
-  endmethod
 endmodule
 
 // Fused Multiply-Add Typeclass
@@ -120,7 +112,6 @@ instance UnsignedFMA#(n) provisos (
     FIFOF#(Bit#(hn)) lowerRes <- mkLFIFOF;
 
     FIFOF#(UInt#(TAdd#(1, TAdd#(n, n)))) res <- mkFIFOF;
-    Reg#(Bool) noClear <- mkReg(True);
 
     // t = 1
     (* fire_when_enabled *)
@@ -175,21 +166,6 @@ instance UnsignedFMA#(n) provisos (
       mulMiddle.deq;
     endrule
 
-    (* fire_when_enabled, no_implicit_conditions *)
-    rule do_clear(!noClear);
-      mulUpper.clear;
-      mulMiddle.clear;
-      mulLower.clear;
-      midArgs.clear;
-      midZ.clear;
-      midNeg.clear;
-      midAdj.clear;
-      upperRes.clear;
-      lowerRes.clear;
-      res.clear;
-      noClear <= True;
-    endrule
-
     // t = 0
     method Action enq(UInt#(n) x, UInt#(n) y, UInt#(TAdd#(n, n)) z);
       Bit#(hn) x1 = pack(x)[vn-1 : vhn];
@@ -212,7 +188,6 @@ instance UnsignedFMA#(n) provisos (
     // t = latency(FMA#(hn)) + 2
     method first = res.first;
     method Action deq; res.deq; endmethod
-    method Action clear if (noClear); noClear <= False; endmethod
   endmodule
 endinstance
 
@@ -220,7 +195,6 @@ interface Multiplier#(numeric type n);
   method Action enq(Bool x_is_signed, Bit#(n) x, Bool y_is_signed, Bit#(n) y);
   method Bit#(TAdd#(n, n)) first;
   method Action deq;
-  method Action clear;
 endinterface
 
 module mkMultiplier (Multiplier#(n)) provisos (UnsignedFMA#(n));
@@ -236,7 +210,6 @@ module mkMultiplier (Multiplier#(n)) provisos (UnsignedFMA#(n));
 
   method first = truncate(pack(fma.first));
   method Action deq = fma.deq;
-  method Action clear = fma.clear;
 endmodule
 
 (* synthesize *)
@@ -254,7 +227,6 @@ module mkMul32 (Multiplier#(32));
 
   method first = pack(fma.first);
   method Action deq = fma.deq;
-  method Action clear = fma.clear;
 */
   Multiplier#(32) m <- mkMultiplier;
   return m;
@@ -264,7 +236,6 @@ interface Divider#(numeric type n);
   method Action enq(Bool num_is_signed, Bit#(n) num, Bool den_is_signed, Bit#(n) den);
   method Tuple2#(Bit#(n), Bit#(n)) first;
   method Action deq;
-  method Action clear;
 endinterface
 
 typedef struct {
@@ -307,7 +278,6 @@ module mkDivider#(DivStep#(n) step) (Divider#(n));
   Vector#(DivStage, Reg#(Maybe#(DivRes#(n)))) res <- replicateM(mkReg(tagged Invalid));
   Fifo#(2, Tuple2#(Bit#(n), Bit#(n))) out <- mkCFFifo(False, False);
   RWire#(DivRes#(n)) enqReq <- mkRWire;
-  Reg#(Bool) noClear <- mkReg(True);
 
   function DivRes#(n) genDiv(Integer i) = divs[i](fromMaybe(?, res[i]));
   function Bool genVal(Integer i) = isValid(res[i]);
@@ -321,7 +291,7 @@ module mkDivider#(DivStep#(n) step) (Divider#(n));
     notFull[i] = notFull[i+1] || !valid[i];
 
   (* fire_when_enabled, no_implicit_conditions *)
-  rule shift(noClear);
+  rule shift;
     if (res[divStage-1] matches tagged Valid .r) begin
       match DivRes {done: .done, qneg: .qneg, rneg: .rneg, quot: .quot, rem: .rem} = r;
       if (out.notFull && done) out.enq(tuple2(qneg ? -quot : quot, rneg ? -rem : rem));
@@ -335,14 +305,6 @@ module mkDivider#(DivStep#(n) step) (Divider#(n));
       res[0] <= enqReq.wget;
     else
       res[0] <= valid[0] ? tagged Valid stepped[0] : tagged Invalid;
-  endrule
-
-  (* fire_when_enabled, no_implicit_conditions *)
-  rule do_clear(!noClear);
-    for (Integer i = 0; i < divStage; i = i + 1)
-      res[i] <= tagged Invalid;
-    out.clear;
-    noClear <= True;
   endrule
 
   method Action enq(Bool nsigned, Bit#(n) num, Bool dsigned, Bit#(n) den) if (notFull[0]);
@@ -362,7 +324,6 @@ module mkDivider#(DivStep#(n) step) (Divider#(n));
 
   method first if (out.notEmpty) = out.first;
   method deq if (out.notEmpty) = out.deq;
-  method Action clear if (noClear); noClear <= False; endmethod
 endmodule
 
 (* noinline *)
