@@ -58,13 +58,13 @@ module mkIMemReq(MergeTree#(2, Warp));
 endmodule
 
 (* synthesize *)
-module mkOneRfIn(MergeTree#(8, Tuple2#(RFWrReq#(ThreadNum), Bit#(TSub#(LogWarpNum, 1)))));
+module mkOneRfIn(MergeTree#(7, Tuple2#(RFWrReq#(ThreadNum), Bit#(TSub#(LogWarpNum, 1)))));
   let t <- mkMergeTree;
   return t;
 endmodule
 
 function
-  Module#(Vector#(2, MergeTree#(8, Tuple2#(RFWrReq#(ThreadNum), Bit#(TSub#(LogWarpNum, 1))))))
+  Module#(Vector#(2, MergeTree#(7, Tuple2#(RFWrReq#(ThreadNum), Bit#(TSub#(LogWarpNum, 1))))))
   mkRfIn = replicateM(mkOneRfIn);
 
 (* synthesize *)
@@ -162,6 +162,7 @@ module mkCore(Core);
   // from RF, EX, MEM, CSR, START
   let rfIn <- mkRfIn;
   Vector#(2, FIFOF#(Tuple2#(RFWrReq#(ThreadNum), Bit#(TSub#(LogWarpNum, 1))))) wbs <- replicateM(mkLFIFOF);
+  Vector#(2, FIFOF#(Tuple3#(Bit#(ThreadNum), Data, Bit#(TSub#(LogWarpNum, 1))))) startWbs <- replicateM(mkLFIFOF);
   Vector#(2, FIFOF#(RFCont)) rfOut <- replicateM(mkGFIFOF(False, True));
   // from RF
   let schedIn <- mkSchedIn;
@@ -287,7 +288,7 @@ module mkCore(Core);
 
   for (Integer i = 0; i < 2; i = i + 1) begin
     (* fire_when_enabled *)
-    rule pull_WB;
+    rule do_WB;
       if (printDebug)
         $display("pull_WB%0d", i);
       wbs[i].enq(rfIn[i].first);
@@ -296,18 +297,25 @@ module mkCore(Core);
 
     (* fire_when_enabled *)
     rule do_RF;
-      if (wbs[i].notEmpty) begin
+      match {.rdReq, .cont} = scoreboards[i].first;
+      match RFCont {iType: .iType, warp: .warp, takenPc: .takenPc, dst: .dst} = cont;
+      let noRd = iType == J || iType == Auipc;
+
+      if (startWbs[i].notEmpty) begin
+        match {.mask, .top, .wid} <- toGet(startWbs[i]).get;
+        RFWrReq#(ThreadNum) wrReq = RFWrReq {
+          conv: True, rd: unpack(0), mask: mask, datas: replicate(top)
+        };
+        rfs[i].ask(fromWrReq(wrReq), wid);
+      end else if (wbs[i].notEmpty) begin
         if (printDebug)
           $display("WB%0d", i);
-        match {.wrReq, .wid} = wbs[i].first;
+        match {.wrReq, .wid} <- toGet(wbs[i]).get;
         rfs[i].ask(fromWrReq(wrReq), wid);
         scoreboards[i].deq(True, wid, wrReq.rd);
-        wbs[i].deq;
-      end else if (scoreboards[i].notEmpty) begin
+      end else if (scoreboards[i].notEmpty && (noRd || rfs[i].notFull)) begin
         if (printDebug)
           $display("do_RF%0d", i);
-        match {.rdReq, .cont} = scoreboards[i].first;
-        match RFCont {iType: .iType, warp: .warp, takenPc: .takenPc, dst: .dst} = cont;
         RFWrReq#(ThreadNum) wrReq = RFWrReq {
           conv: False,
           rd: dst,
@@ -316,13 +324,12 @@ module mkCore(Core);
         };
         let upperWid = warp.wid[logWarpNum-1 : 1];
 
-        case (iType)
-          J, Auipc: rfIn[i].iport[0].put(tuple2(wrReq, upperWid));
-          default: begin
-            rfs[i].ask(fromRdReq(rdReq), upperWid);
-            rfOut[i].enq(cont);
-          end
-        endcase
+        if (noRd) begin
+          rfIn[i].iport[0].put(tuple2(wrReq, upperWid));
+        end else begin
+          rfs[i].ask(fromRdReq(rdReq), upperWid);
+          rfOut[i].enq(cont);
+        end
         scoreboards[i].deq(False, ?, ?);
       end
     endrule
@@ -662,10 +669,7 @@ module mkCore(Core);
     match SchedResp {warp: .warp, write: .write, top: .top} = resp;
     let lowerWid = warp.wid[0];
     let upperWid = warp.wid[logWarpNum-1 : 1];
-    RFWrReq#(ThreadNum) rfReq = RFWrReq {
-      conv: True, rd: unpack(0), mask: warp.mask, datas: replicate(top)
-    };
-    if (write) rfIn[lowerWid].iport[7].put(tuple2(rfReq, upperWid));
+    if (write) startWbs[lowerWid].enq(tuple3(warp.mask, top, upperWid));
     warpIn[lowerWid].iport[4].put(warp);
   endmethod
 

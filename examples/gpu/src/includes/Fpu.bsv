@@ -317,7 +317,7 @@ endmodule
 module mkVectorFpu(VectorFpu);
     FIFOF#(FpuIssue) issueQ <- mkFIFOF;
     Fifo#(8, FpuFunc) fpu_func_fifo <- mkCFFifo(True, True); // records issue order
-    Fifo#(8, Vector#(ThreadNum, FpuResult)) fpu_exec_fifo_out <- mkFpuExecFifoOut; // all datapaths dequeue into this
+    FIFOF#(Vector#(ThreadNum, FpuResult)) fpu_exec_fifo_out <- mkFIFOF; // all datapaths dequeue into this
 
     Vector#(ThreadNum, Server#(MulAddArg, FpuRecResult))  float_mulAdd  <- replicateM(mkFloatMulAdd);
     Vector#(ThreadNum, Server#(DivSqrtArg, FpuRecResult)) float_divSqrt <- replicateM(mkFloatDivSqrt);

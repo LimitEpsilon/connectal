@@ -73,6 +73,7 @@ typedef struct {
 
 interface VectorRFile#(numeric type n);
   method Action ask(RFReq#(n) req, Bit#(TSub#(LogWarpNum, 1)) wid);
+  method Bool notFull;
   method ActionValue#(RFResp#(n)) ans;
 endinterface
 
@@ -95,12 +96,12 @@ endmodule
 module mkVecRFile(VectorRFile#(n));
   Vector#(n, BRAM2Port#(LaneRIndx, Data)) rfiles <- replicateM(mkRFileBRAM);
   Vector#(n, BRAM1Port#(FPRIndx, Data)) fpr <- replicateM(mkFPRBRAM);
-  FIFOF#(Tuple2#(RFReq#(n), Bit#(TSub#(LogWarpNum, 1)))) reqs <- mkFIFOF;
-  FIFOF#(Bool) respAisZero <- mkGFIFOF(False, True);
-  FIFOF#(Vector#(n, Data)) respA <- mkBypassFIFOF;
-  FIFOF#(Bool) respBisZero <- mkGFIFOF(False, True);
-  FIFOF#(Vector#(n, Data)) respB <- mkBypassFIFOF;
-  FIFOF#(Vector#(n, Data)) respC <- mkBypassFIFOF;
+  FIFOF#(Tuple2#(RFReq#(n), Bit#(TSub#(LogWarpNum, 1)))) reqs <- mkLFIFOF;
+  FIFOF#(Bool) respAisZero <- mkUGFIFOF;
+  FIFOF#(Vector#(n, Data)) respA <- mkFIFOF;
+  FIFOF#(Bool) respBisZero <- mkUGFIFOF;
+  FIFOF#(Vector#(n, Data)) respB <- mkFIFOF;
+  FIFOF#(Vector#(n, Data)) respC <- mkFIFOF;
   Reg#(Bool) rfInit <- mkReg(False);
   Reg#(Bit#(FPRIndxSz)) rfInitPtr <- mkReg(0);
 
@@ -160,11 +161,6 @@ module mkVecRFile(VectorRFile#(n));
       datain: datas[i]
     };
 
-    if (!write) begin
-      respAisZero.enq(pack(rs1) == 0);
-      respBisZero.enq(!conv && pack(rs2) == 0);
-    end
-
     for (Integer i = 0; i < valueOf(n); i = i + 1) begin
       if (!write || (pack(rd) != 0 || conv) && unpack(mask[i])) begin
         rfiles[i].portA.request.put(gprReqA(i));
@@ -210,19 +206,21 @@ module mkVecRFile(VectorRFile#(n));
 
   method Action ask(RFReq#(n) req, Bit#(TSub#(LogWarpNum, 1)) wid);
     reqs.enq(tuple2(req, wid));
+    if (!req.write) begin
+      respAisZero.enq(pack(req.rs1) == 0);
+      respBisZero.enq(!req.conv && pack(req.rs2) == 0);
+    end
   endmethod
 
+  // must be checked when enqueuing a read request
+  method Bool notFull = respAisZero.notFull;
+
   method ActionValue#(RFResp#(n)) ans;
-    let rv1 = respA.first;
-    let rv1isZero = respAisZero.first;
-    let rv2 = respB.first;
-    let rv2isZero = respBisZero.first;
-    let rv3 = respC.first;
-    respA.deq;
-    respAisZero.deq;
-    respB.deq;
-    respBisZero.deq;
-    respC.deq;
+    let rv1 <- toGet(respA).get;
+    let rv1isZero <- toGet(respAisZero).get;
+    let rv2 <- toGet(respB).get;
+    let rv2isZero <- toGet(respBisZero).get;
+    let rv3 <- toGet(respC).get;
     if (rv1isZero) rv1 = replicate(0);
     if (rv2isZero) rv2 = replicate(0);
     return RFResp {rv1: rv1, rv2: rv2, rv3: rv3};
@@ -245,11 +243,13 @@ endinterface
 
 typedef TDiv#(WarpNum, 2) WarpsPerBank;
 
+// The request/continuation pair plus the register bitmask decoded from it at
+// enq time, so enq_out's wakeup test is the single AND (pending & srcMask).
+// srcMask covers rs1/rs2/rs3 and the destination, the last being the WAW check.
 typedef struct {
   RFRdReq  req;
   RFCont   cont;
   Bit#(64) srcMask;
-  Bit#(64) dstMask;
 } SbEntry deriving (Bits, Eq, FShow);
 
 (* synthesize *)
@@ -260,6 +260,12 @@ endmodule
 
 (* synthesize *)
 module mkScoreboard(Scoreboard);
+  // The CReg ports carry the intra-cycle schedule: first/notEmpty/deq use
+  // port 0, enq_out uses port 1, so enq_out sees deq's clear of out and its
+  // set of pending in the same cycle.  pending has to be a CReg for that: a
+  // plain register would let an enq_out firing in the cycle a read-deq retires
+  // pick a second entry from that lane against a pending that does not yet
+  // hold the retiring destination.
   Reg#(Maybe#(Tuple2#(RFRdReq, RFCont))) out[2] <- mkCReg(2, tagged Invalid);
   Vector#(WarpsPerBank, Fifo#(4, SbEntry)) ibuf <- replicateM(mkScoreboardIport);
   Vector#(WarpsPerBank, Array#(Reg#(Bit#(64)))) pending <- replicateM(mkCReg(2, 0));
@@ -270,24 +276,9 @@ module mkScoreboard(Scoreboard);
     for (Integer i = 0; i < valueOf(WarpsPerBank); i = i + 1)
       isReady[i] = ibuf[i].notEmpty && (pending[i][1] & ibuf[i].first.srcMask) == 0;
 
-    Vector#(WarpsPerBank, Bool) oh = replicate(False);
-    Bool anyReady = False;
-    for (Integer i = 0; i < valueOf(WarpsPerBank); i = i + 1) begin
-      oh[i] = isReady[i] && !anyReady;
-      anyReady = anyReady || isReady[i];
-    end
-
-    Bit#(SizeOf#(Tuple2#(RFRdReq, RFCont))) selBits = 0;
-    for (Integer i = 0; i < valueOf(WarpsPerBank); i = i + 1)
-      selBits = selBits | (oh[i] ? pack(tuple2(ibuf[i].first.req, ibuf[i].first.cont)) : 0);
-
-    if (anyReady) begin
-      out[1] <= tagged Valid unpack(selBits);
-      for (Integer i = 0; i < valueOf(WarpsPerBank); i = i + 1)
-        if (oh[i]) begin
-          pending[i][1] <= (pending[i][1] | ibuf[i].first.dstMask) & ~1;
-          ibuf[i].deq;
-        end
+    if (findIndex(id, isReady) matches tagged Valid .idx) begin
+      out[1] <= tagged Valid tuple2(ibuf[idx].first.req, ibuf[idx].first.cont);
+      ibuf[idx].deq;
     end
   endrule
 
@@ -298,93 +289,26 @@ module mkScoreboard(Scoreboard);
                      | (req.conv ? 0 : (1 << pack(req.rs2)))
                      | (req.rs3.isFpr ? (1 << {1'b1, req.rs3.idx}) : 0)
                      | dstMask;
-    ibuf[wid].enq(SbEntry {req: req, cont: cont, srcMask: srcMask, dstMask: dstMask});
+    ibuf[wid].enq(SbEntry {req: req, cont: cont, srcMask: srcMask});
   endmethod
 
+  // pending is set when the continuation retires: the write branch clears rd,
+  // the read branch sets the retiring destination.
   method Action deq(Bool write, Bit#(TSub#(LogWarpNum, 1)) wid, RIndx rd);
-    if (write)
-      pending[wid][0] <= pending[wid][0] & ~(1 << pack(rd)) & ~1;
-    else if (isValid(out[0]))
+    let ne = isValid(out[0]);
+    match {.*, .cont} = fromMaybe(?, out[0]);
+    let idx = write ? wid : cont.warp.wid[valueOf(LogWarpNum)-1 : 1];
+    let cur = pending[idx][0];
+    // if !write && !ne, (ne << cont.dst) == 0, so pending[idx] doesn't change;
+    // if cont.dst == 0, it is cleared out anyway
+    let nxt = write ? cur & ~(1 << pack(rd))
+                    : cur | (extend(pack(ne)) << pack(cont.dst));
+    pending[idx][0] <= nxt & ~1;
+    if (!write && ne)
       out[0] <= tagged Invalid;
   endmethod
 
-  method first if (isValid(out[0])) = fromMaybe(?, out[0]);
+  method first = fromMaybe(?, out[0]);
   method notEmpty = isValid(out[0]);
 endmodule
 
-/*
-(* synthesize *)
-module mkScoreboardIport(Fifo#(4, Tuple2#(RFRdReq, RFCont)));
-  let m <- mkCFFifo(True, False);
-  return m;
-endmodule
-
-(* synthesize *)
-module mkScoreboard(Scoreboard);
-  // The correctness of this module depends on the output FIFO containing only one continuation
-  // This is because we update the pending register when the continuation is dequeued
-  Reg#(Maybe#(Tuple2#(RFRdReq, RFCont))) out[2] <- mkCReg(2, tagged Invalid);
-  Vector#(TDiv#(WarpNum, 2), Fifo#(4, Tuple2#(RFRdReq, RFCont))) ibuf <- replicateM(mkScoreboardIport);
-  Vector#(TDiv#(WarpNum, 2), Reg#(Bit#(64))) pending <- replicateM(mkReg(0));
-  Reg#(Bool) noClear <- mkReg(True);
-
-  (* fire_when_enabled, no_implicit_conditions *)
-  rule enq_out(!isValid(out[0]));
-    Vector#(TDiv#(WarpNum, 2), Bool) isReady;
-    for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1) begin
-      match {.req, .cont} = ibuf[i].first;
-      Bool rs1Pending = unpack(pending[i][pack(req.rs1)]);
-      Bool rs2Pending = !req.conv && unpack(pending[i][pack(req.rs2)]);
-      Bool rs3Pending = req.rs3.isFpr && unpack(pending[i][{1'b1, req.rs3.idx}]);
-      Bool dstPending = unpack(pending[i][pack(cont.dst)]);
-      //  if (ibuf[i].notEmpty && rs1Pending)
-      //    $display("WID %d, rs1: %d locked", i, pack(req.rs1));
-      //  if (ibuf[i].notEmpty && rs2Pending)
-      //    $display("WID %d, rs2: %d locked", i, pack(req.rs2));
-      //  if (ibuf[i].notEmpty && rs3Pending)
-      //    $display("WID %d, rs3: %d locked", i, req.rs3.idx);
-      //  if (ibuf[i].notEmpty && dstPending)
-      //    $display("WID %d, rd: %d locked", i, pack(cont.dst));
-      isReady[i] = ibuf[i].notEmpty && !rs1Pending && !rs2Pending && !rs3Pending && !dstPending;
-    end
-    if (findIndex(id, isReady) matches tagged Valid .idx) begin
-      out[0] <= tagged Valid ibuf[idx].first;
-      ibuf[idx].deq;
-    end
-  endrule
-
-  (* fire_when_enabled, no_implicit_conditions *)
-  rule do_clear(!noClear);
-    out[1] <= tagged Invalid;
-    for (Integer i = 0; i < valueOf(WarpNum) / 2; i = i + 1) begin
-      ibuf[i].clear;
-      pending[i] <= 0;
-    end
-    noClear <= True;
-  endrule
-
-  method Action enq(RFRdReq req, RFCont cont);
-    Bit#(TSub#(LogWarpNum, 1)) wid = cont.warp.wid[valueOf(LogWarpNum)-1 : 1];
-    ibuf[wid].enq(tuple2(req, cont));
-  endmethod
-
-  method Action deq(Bool write, Bit#(TSub#(LogWarpNum, 1)) wid, RIndx rd) if (noClear);
-    let notEmpty = isValid(out[1]);
-    match {.req, .cont} = fromMaybe(?, out[1]);
-    let idx = write ? wid : cont.warp.wid[valueOf(LogWarpNum)-1 : 1];
-    let curPending = pending[idx];
-    // if !write && !notEmpty, (notEmpty << cont.dst) == 0, so pending[idx] doesn't change
-    // if cont.dst == 0, it is cleared out anyway
-    let nextPending =
-      write
-      ? curPending & ~(1 << pack(rd))
-      : curPending | (extend(pack(notEmpty)) << pack(cont.dst));
-    pending[idx] <= nextPending & ~1;
-    if (!write && notEmpty)
-      out[1] <= tagged Invalid;
-  endmethod
-  method first if (isValid(out[1])) = fromMaybe(?, out[1]);
-  method notEmpty = isValid(out[1]);
-  method Action clear if (noClear); noClear <= False; endmethod
-endmodule
-*/
