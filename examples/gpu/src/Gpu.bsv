@@ -366,10 +366,15 @@ module mkCore(Core);
         $display("pc+4: %x, wid: %d, rs1: %x, rs2: %x", warp.pc, warp.wid, rs1, rs2);
 
       let pred = pack(map(lsb, rv1)) ^ pack(replicate(predN));
+      Bit#(ThreadNum) predMask = warp.mask & pred;
+      // SPLIT sends the ipdom (takenPc, so 4-byte aligned) with the divergence
+      // decision in bit 0; the scheduler pushes an entry only when it is set.
+      Bool splitDiverges = (predMask != 0) && (predMask != warp.mask);
       SchedReq schedReq = SchedReq {
         warp: warp,
         f: funct3,
-        v1: (funct3 == fnPRED || funct3 == fnSPLIT) ? zeroExtend(pred) : rs1,
+        v1: funct3 == fnPRED  ? zeroExtend(pred) :
+            funct3 == fnSPLIT ? (takenPc | zeroExtend(pack(splitDiverges))) : rs1,
         v2: rs2
       };
       AluReq#(ThreadNum) exReq = AluReq {
@@ -684,7 +689,7 @@ module mkProc(Proc);
   // CSR
   let csrf <- mkCsrFile;
   // SCHED
-  let scheduler <- mkOldScheduler;
+  let scheduler <- mkScheduler;
   Reg#(Addr) startPc <- mkReg(0);
   Reg#(Data) kernelArg <- mkReg(0);
   Reg#(Bool) started <- mkReg(False);
@@ -700,7 +705,7 @@ module mkProc(Proc);
     if (printDebug)
       $display("process_iMem");
     match Warp {pc: .pc, mask: .mask} <- core.getIMemReq;
-    csrf.newInst(countIf(id, unpack(mask)));
+    csrf.newInst(countOnes(mask));
     MemoryRequest#(AddrSz, DataSz) req = MemoryRequest{
       write: False,
       byteen: ?,

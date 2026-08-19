@@ -50,6 +50,9 @@ function DecodedInst decode(RawInst inst);
   Data immB = signExtend({ inst[31], inst[7], inst[30:25], inst[11:8], 1'b0 });
   Data immU = signExtend({ inst[31:12], 12'b0 });
   Data immJ = signExtend({ inst[31], inst[19:12], inst[20], inst[30:21], 1'b0 });
+  // SPLIT carries the offset to its JOIN's ipdom. conv forces src2 to x0 and
+  // opSched has no destination, so the rs2 and rd fields are free to hold it.
+  Data immSched = signExtend({ inst[31:20], inst[11:7], 2'b0 });
 
   let iType = case (opcode)
     opOpImm: Alu; // rd <- op rs1 immI; pc <- pc + 4
@@ -110,6 +113,7 @@ function DecodedInst decode(RawInst inst);
       opJal: immJ;
       opBranch: immB;
       opStore, opStoreFp: immS;
+      opSched: immSched;
       default: immI;
     endcase;
 
@@ -136,10 +140,11 @@ function DecodedInst decode(RawInst inst);
     fpuFunc: fpuFunc,
     funct3: funct3,
     conv: conv,
-    predN: rd != 0 && rs2 != 0, // if pred, rs2 != 0. if split, rd != 0
+    predN: rd != 0 && rs2 != 0, // PRED negates its predicate when both are nonzero
     dst: RIndx {isFpr: dstFp, idx: dstValid ? rd : 0},
     src1: RIndx {isFpr: src1Fp, idx: src1Valid ? rs1 : 0},
-    src2: RIndx {isFpr: src2Fp, idx: src2Valid || src2Fp ? rs2 : 0},
+    // conv reads the divergence-stack top out of x0, which frees the rs2 field
+    src2: RIndx {isFpr: src2Fp, idx: (src2Valid || src2Fp) && !conv ? rs2 : 0},
     src3: RIndx {isFpr: src3Fp, idx: src3Fp ? rs3 : 0},
     csr: unpack(truncate(immI)),
     immValid: immValid,
