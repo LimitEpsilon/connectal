@@ -97,11 +97,11 @@ module mkScheduler(Scheduler);
   Vector#(BarNum, Reg#(Bit#(TLog#(WarpNum)))) barCount <- replicateM(mkReg(0)); // how many warps *left over* before synchronization
 
   // requests
-  FIFOF#(Warp) tmcReqs <- mkLFIFOF;
-  FIFOF#(Tuple2#(Addr, WspawnReq)) wspawnReqs <- mkLFIFOF; // first component is the pc of the caller, caller wid is always 0 and mask is always 1
+  FIFOF#(Warp) tmcReqs <- mkFIFOF;
+  FIFOF#(Tuple2#(Addr, WspawnReq)) wspawnReqs <- mkFIFOF; // first component is the pc of the caller, caller wid is always 0 and mask is always 1
   Reg#(WspawnReq) curSpawn <- mkReg(unpack(0));
-  FIFOF#(JoinReq) joinReqs <- mkLFIFOF;
-  FIFOF#(SplitReq) splitReqs <- mkLFIFOF;
+  FIFOF#(JoinReq) joinReqs <- mkFIFOF;
+  FIFOF#(SplitReq) splitReqs <- mkFIFOF;
   FIFOF#(BarReq) barReqs <- mkFIFOF;
 
   Bit#(LogWarpNum) upperCurSpawn = curSpawn.count[valueOf(LogWarpNum):1];
