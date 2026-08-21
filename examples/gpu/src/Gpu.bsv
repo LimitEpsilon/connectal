@@ -777,8 +777,8 @@ module mkProc(Proc);
   (* fire_when_enabled *)
   rule start_csr(!csrf.started && started);
     csrf.start(kernelArg);
-    let dummy = Warp {wid: 1, pc: 0, mask: 0}; // need the warp id to be odd
-    let req = SchedReq {warp: dummy, f: fnWSPAWN, v1: 2, v2: startPc};
+    let startWarp = Warp {wid: 0, pc: startPc, mask: 0};
+    let req = SchedReq {warp: startWarp, f: fnWSPAWN, v1: 1, v2: 0};
     scheduler.putSchedReq(req);
     $display("Start at pc %x, kernel_arg: %x\n", startPc, kernelArg);
     $fflush(stdout);

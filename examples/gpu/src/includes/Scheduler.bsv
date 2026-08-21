@@ -21,8 +21,8 @@ typedef struct {
 } SchedReq deriving (Bits, Eq, FShow);
 
 typedef struct {
-  Bit#(LogWarpNum) count;
   Addr pc;
+  Bit#(TAdd#(LogWarpNum, 1)) count;
 } WspawnReq deriving (Bits, Eq, FShow);
 
 typedef struct {
@@ -80,9 +80,9 @@ endmodule
 // TMC, WSPAWN, SPLIT, JOIN, PRED, BAR
 (* synthesize *)
 module mkScheduler(Scheduler);
-  // a bitvector of what even/odd wids are assigned, number of allocated even/odd wids
-  Vector#(2, Reg#(Bit#(TDiv#(WarpNum, 2)))) widAlloc <- replicateM(mkReg(pack(replicate(True))));
-  Vector#(2, Reg#(Bit#(TLog#(TDiv#(TAdd#(WarpNum, 1), 2))))) widCount <- replicateM(mkReg(0)); // how many wids *were allocated*
+  // a bitvector of what wids are free
+  Reg#(Bit#(WarpNum)) widAlloc <- mkReg(-1);
+  Reg#(Bit#(LogWarpNum)) widPtr <- mkReg(1); // store the next wid to be allocated, is never 0
 
   // warp divergence stack for intra-warp synchronization
   let stacks <- mkStacks;
@@ -98,11 +98,13 @@ module mkScheduler(Scheduler);
 
   // requests
   FIFOF#(Warp) tmcReqs <- mkLFIFOF;
-  FIFOF#(WspawnReq) wspawnReqs <- mkLFIFOF;
-  Reg#(WspawnReq) curSpawn <- mkReg(WspawnReq{count: 1, pc: 0});
+  FIFOF#(Tuple2#(Addr, WspawnReq)) wspawnReqs <- mkLFIFOF; // first component is the pc of the caller, caller wid is always 0 and mask is always 1
+  Reg#(WspawnReq) curSpawn <- mkReg(unpack(0));
   FIFOF#(JoinReq) joinReqs <- mkLFIFOF;
   FIFOF#(SplitReq) splitReqs <- mkLFIFOF;
   FIFOF#(BarReq) barReqs <- mkFIFOF;
+
+  Bit#(LogWarpNum) upperCurSpawn = curSpawn.count[valueOf(LogWarpNum):1];
 
   // done
   FIFOF#(void) done <- mkFIFOF;
@@ -125,50 +127,51 @@ module mkScheduler(Scheduler);
     stackInit <= nextStackInitPtr == 0;
   endrule
 
-  // TMC, PRED, WSPAWN
+  // TMC, PRED
   (* fire_when_enabled *)
   rule do_tmc(tmcReqs.notEmpty);
     let warp <- toGet(tmcReqs).get;
     match Warp {wid: .wid, pc: .pc, mask: .mask} = warp;
-    Bit#(TLog#(TDiv#(WarpNum, 2))) upperWid = wid[valueOf(LogWarpNum)-1:1];
-    let alloc = widAlloc[wid[0]];
-    let countNeg = widCount[~wid[0]];
-    let count = widCount[wid[0]];
+    Bit#(WarpNum) onehot = 1 << wid;
+    let isDone = (~widAlloc) == onehot;
+    let nextAlloc = widAlloc | onehot;
     if (mask != 0)
       resps.iport[0].put(SchedResp {warp: warp, write: False, top: 0});
     else begin
-      widAlloc[wid[0]] <= alloc | (1 << upperWid); // restore alloc
-      widCount[wid[0]] <= count == 0 ? 0 : count - 1; // restore count
-      if (countNeg == 0 && count == 1) done.enq(?);
+      widAlloc <= nextAlloc; // restore alloc
+      if (isDone) done.enq(?);
     end
   endrule
 
-  // new warps from WSPAWN
+  // WSPAWN
   (* fire_when_enabled *)
-  rule do_wspawn(!tmcReqs.notEmpty && curSpawn.count != 1);
-    let evenWid = countLSB(widAlloc[0]);
-    let oddWid = countLSB(widAlloc[1]);
+  rule do_wspawn(!tmcReqs.notEmpty && upperCurSpawn != 0);
     match WspawnReq {count: .count, pc: .pc} = curSpawn;
-    let nextCurSpawn = WspawnReq {count: count - 1, pc: pc};
-    if (widCount[1] < widCount[0]) begin // allocate odd wid
-      widCount[1] <= widCount[1] + 1;
-      widAlloc[1] <= widAlloc[1] & ~(1 << oddWid);
-      let newWarp = Warp {mask: 1, wid: {pack(oddWid), 1'b1}, pc: pc};
+    let nextAlloc = widAlloc & ~(1 << widPtr);
+    let nextPtr = widPtr == -1 ? 1 : widPtr + 1;
+    let nextSpawn = WspawnReq {count: count - 1, pc: pc};
+
+    let newWarp = Warp {mask: 1, wid: widPtr, pc: pc};
+    if (unpack(widAlloc[widPtr])) begin // spin until this bit gets set
       resps.iport[1].put(SchedResp {warp: newWarp, write: True, top: 0});
-      curSpawn <= nextCurSpawn;
-    end else if (widAlloc[0] != 0) begin // allocate even wid
-      widCount[0] <= widCount[0] + 1;
-      widAlloc[0] <= widAlloc[0] & ~(1 << evenWid);
-      let newWarp = Warp {mask: 1, wid: {pack(evenWid), 1'b0}, pc: pc};
-      resps.iport[1].put(SchedResp {warp: newWarp, write: True, top: 0});
-      curSpawn <= nextCurSpawn;
-    end // else, no free warps
+      widAlloc <= nextAlloc;
+      widPtr <= nextPtr;
+      curSpawn <= nextSpawn;
+    end
   endrule
 
   (* fire_when_enabled *)
-  rule process_wspawn(curSpawn.count == 1); // curSpawn is invalid, fill it up
-    curSpawn <= wspawnReqs.first;
-    wspawnReqs.deq;
+  rule process_wspawn(!tmcReqs.notEmpty && wspawnReqs.notEmpty && upperCurSpawn == 0);
+    Bit#(WarpNum) nextAlloc = widAlloc & ~1;
+    match {.pc, .nextSpawn} = wspawnReqs.first;
+    let caller = Warp {mask: 1, wid: 0, pc: pc};
+    if (curSpawn.count[0] == 1) begin
+      widAlloc <= nextAlloc;
+      nextSpawn.count = 0;
+      resps.iport[1].put(SchedResp {warp: caller, write: unpack(widAlloc[0]), top: 0});
+      wspawnReqs.deq;
+    end
+    curSpawn <= nextSpawn;
   endrule
 
   // SPLIT
@@ -360,10 +363,7 @@ module mkScheduler(Scheduler);
 
     case (f)
       fnTMC: tmcReqs.enq(tmcWarp);
-      fnWSPAWN: begin
-        tmcReqs.enq(warp);
-        wspawnReqs.enq(wspawnReq);
-      end
+      fnWSPAWN: wspawnReqs.enq(tuple2(warp.pc, wspawnReq));
       fnSPLIT: splitReqs.enq(splitReq);
       fnJOIN: begin
         let ptr = fromMaybe(?, top);
