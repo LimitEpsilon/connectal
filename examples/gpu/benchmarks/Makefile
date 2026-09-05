@@ -11,16 +11,24 @@ vecadd: vecadd.cpp
 sgemm: sgemm.cpp
 	$(CC) -o sgemm sgemm.cpp main.c $(CFLAGS)
 
+MSTRESS_NUM_WARPS ?= 16
+
 mstress: mstress.cpp
-	$(CC) -o mstress mstress.cpp main.c $(CFLAGS)
+	$(CC) -DMSTRESS_NUM_WARPS=$(MSTRESS_NUM_WARPS) -o mstress mstress.cpp main.c $(CFLAGS)
+
+mstress-w8: mstress.cpp
+	$(CC) -DMSTRESS_NUM_WARPS=8 -o $@ mstress.cpp main.c $(CFLAGS)
+
+mstress-w16: mstress.cpp
+	$(CC) -DMSTRESS_NUM_WARPS=16 -o $@ mstress.cpp main.c $(CFLAGS)
 
 madmax: madmax.cpp
 	$(CC) -o madmax madmax.cpp main.c $(CFLAGS)
 
-all: loadelf.h main.c vecadd sgemm mstress madmax
+all: loadelf.h main.c vecadd sgemm mstress mstress-w8 mstress-w16 madmax
 
 clean:
-	rm -rf *.o vecadd sgemm mstress madmax
+	rm -rf *.o vecadd sgemm mstress mstress-w8 mstress-w16 madmax
 
 .PHONY: clean all
 .DEFAULT_GOAL := all

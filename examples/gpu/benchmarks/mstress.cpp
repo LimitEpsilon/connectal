@@ -4,11 +4,19 @@
 #include <stdint.h>
 #include <vector>
 #include <cmath>
+#include <algorithm>
+#include <limits>
 #include "mem_alloc.h"
 
 // defined in common.h for each test case
 #define TYPE float
 #define NUM_LOADS 8
+
+#ifndef MSTRESS_NUM_WARPS
+#define MSTRESS_NUM_WARPS 16
+#endif
+
+static_assert(MSTRESS_NUM_WARPS > 0, "MSTRESS_NUM_WARPS must be positive");
 
 typedef struct {
   uint32_t num_tasks;
@@ -100,7 +108,7 @@ void gen_src_data(std::vector<float>& test_data,
 
 // originally in the main function
 uint32_t num_cores = 1;
-uint32_t num_warps = 16;
+uint32_t num_warps = MSTRESS_NUM_WARPS;
 uint32_t num_threads = 4;
 uint32_t total_threads = num_cores * num_warps * num_threads;
 
