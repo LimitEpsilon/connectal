@@ -68,7 +68,54 @@ endinterface
 (* synthesize *)
 module mkStacks(BRAM2Port#(Bit#(TAdd#(LogWarpNum, LogThreadNum)), StackEnt));
   let ram <- mkBypassBRAM;
-  return ram;
+  // Register port A's read response before exposing it to do_join.  The
+  // response value is the snapshot returned by mkBypassBRAM, so a later write
+  // cannot change it while it waits here.  mkFIFOF is non-bypassing: an enq by
+  // stage_response_a is not visible to a same-cycle response.get, which makes
+  // this a physical pipeline boundary between the stack BRAM and JOIN logic.
+  FIFOF#(StackEnt) responseA <- mkFIFOF;
+  // mkBypassBRAM normally keeps port A occupied until its response is consumed.
+  // Staging that response would otherwise free the underlying port early and
+  // allow a second JOIN snapshot to get ahead of the first joinReq.  Preserve
+  // the original one-outstanding-request contract at this wrapper boundary.
+  Reg#(Bool) responsePendingA[2] <- mkCReg(2, False);
+
+  (* fire_when_enabled *)
+  rule stage_response_a;
+    let x <- ram.portA.response.get;
+    responseA.enq(x);
+  endrule
+
+  interface BRAMServer portA;
+    interface Put request;
+      method Action put(BRAMRequest#(Bit#(TAdd#(LogWarpNum, LogThreadNum)), StackEnt) req)
+        if (!responsePendingA[1]);
+        ram.portA.request.put(req);
+        // mkBypassBRAM produces responses for reads only; responseOnWrite is
+        // ignored by that implementation, so mirror its contract here.
+        if (!req.write)
+          responsePendingA[1] <= True;
+      endmethod
+    endinterface
+
+    interface Get response;
+      method ActionValue#(StackEnt) get;
+        let x <- toGet(responseA).get;
+        responsePendingA[0] <= False;
+        return x;
+      endmethod
+    endinterface
+  endinterface
+
+  interface portB = ram.portB;
+
+  method Action portAClear;
+    ram.portAClear;
+    responseA.clear;
+    responsePendingA[1] <= False;
+  endmethod
+
+  method Action portBClear = ram.portBClear;
 endmodule
 
 (* synthesize *)

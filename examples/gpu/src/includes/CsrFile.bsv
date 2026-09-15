@@ -44,7 +44,7 @@ module mkCsrFile(CsrFile#(ThreadNum));
   Reg#(Bool) startReg <- mkConfigReg(False);
   Reg#(CSR) pendingAddr <- mkRegU;
   Reg#(Maybe#(Data)) pending <- mkReg(tagged Invalid);
-  FIFOF#(Vector#(ThreadNum, Data)) resps <- mkLFIFOF;
+  FIFOF#(Vector#(ThreadNum, Data)) resps <- mkFIFOF;
 
   // CSR
   Reg#(Data) numInsts <- mkReg(0); // csrInstret -- read only

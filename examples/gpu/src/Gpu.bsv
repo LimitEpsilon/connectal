@@ -27,6 +27,8 @@ import Memory::*;
 import VectorMem::*;
 import CoalTree::*;
 import MergeTree::*;
+import CompletionNetwork::*;
+import IssueNetwork::*;
 
 (* synthesize *)
 module mkCall(CoalTree#(ThreadNum, AddrSz, WarpId));
@@ -37,7 +39,10 @@ endmodule
 
 (* synthesize *)
 module mkOneWarpIn(MergeTree#(6, Warp));
-  let t <- mkMergeTree;
+  // Input 5 is the sequential PC+4 return. Its two-entry CReg queue permits a
+  // dequeue and replacement enqueue in the same cycle while shortening the
+  // instruction-memory response path.
+  let t <- mkMergeTreeWithLastPipeline(True);
   return t;
 endmodule
 
@@ -47,73 +52,50 @@ function
 
 (* synthesize *)
 module mkWarps(Fifo#(MaxDivergence, Warp));
-  let fifo <- mkBRAMFifo(False, False);
+  // Keep the oldest queued warp in a register while retaining BRAM storage
+  // for the divergence backlog. This preserves one dequeue per cycle and
+  // removes the warp BRAM from the instruction-memory request path.
+  let fifo <- mkFrontBRAMFifo(False, False);
   return fifo;
 endmodule
 
+typedef Tuple2#(Vector#(ThreadNum, Data), EXCont) EXResult;
+typedef Vector#(ThreadNum, Maybe#(KV#(AddrSz, WarpId))) CallInput;
+typedef Tuple2#(MemReq#(ThreadNum), MEMCont) MemIssue;
+
 (* synthesize *)
-module mkIMemReq(MergeTree#(2, Warp));
-  let t <- mkMergeTree;
-  return t;
+module mkEXResultQ(Fifo#(2, EXResult));
+  let q <- mkCFFifo(True, False);
+  return q;
 endmodule
 
 (* synthesize *)
-module mkOneRfIn(MergeTree#(7, Tuple2#(RFWrReq#(ThreadNum), Bit#(TSub#(LogWarpNum, 1)))));
-  let t <- mkMergeTree;
-  return t;
-endmodule
-
-function
-  Module#(Vector#(2, MergeTree#(7, Tuple2#(RFWrReq#(ThreadNum), Bit#(TSub#(LogWarpNum, 1))))))
-  mkRfIn = replicateM(mkOneRfIn);
-
-(* synthesize *)
-module mkSchedIn(MergeTree#(2, SchedReq));
-  let t <- mkMergeTree;
-  return t;
+module mkCallInputQ(Fifo#(2, CallInput));
+  let q <- mkCFFifo(True, False);
+  return q;
 endmodule
 
 (* synthesize *)
-module mkExIn(MergeTree#(2, Tuple2#(AluReq#(ThreadNum), EXCont)));
-  let t <- mkMergeTree;
-  return t;
+module mkMemIssueQ(Fifo#(2, MemIssue));
+  let q <- mkCFFifo(True, False);
+  return q;
 endmodule
 
 (* synthesize *)
-module mkMulIn(MergeTree#(2, Tuple2#(MulReq#(ThreadNum), WBCont)));
-  let t <- mkMergeTree;
-  return t;
+module mkLocalWritebackQ(Fifo#(2, CompletionPayload));
+  let q <- mkCFFifo(True, False);
+  return q;
 endmodule
 
-(* synthesize *)
-module mkDivIn(MergeTree#(2, Tuple2#(DivReq#(ThreadNum), WBCont)));
-  let t <- mkMergeTree;
-  return t;
-endmodule
-
-(* synthesize *)
-module mkFpuIn(MergeTree#(2, Tuple2#(FpuReq#(ThreadNum), WBCont)));
-  let t <- mkMergeTree;
-  return t;
-endmodule
-
-(* synthesize *)
-module mkBrIn(MergeTree#(2, Tuple2#(BruReq#(ThreadNum), BRCont)));
-  let t <- mkMergeTree;
-  return t;
-endmodule
-
-(* synthesize *)
-module mkMemIn(MergeTree#(1, Tuple2#(MemReq#(ThreadNum), MEMCont)));
-  let t <- mkMergeTree;
-  return t;
-endmodule
-
-(* synthesize *)
-module mkCsrIn(MergeTree#(2, Tuple2#(CsrReq#(ThreadNum), WBCont)));
-  let t <- mkMergeTree;
-  return t;
-endmodule
+function CompletionPacket makeCompletionPacket(
+    Warp warp, RFWrReq#(ThreadNum) req);
+  Bit#(LogBankNum) lowerWid = truncate(warp.wid);
+  Bit#(LocalWarpNum) upperWid = truncateLSB(warp.wid);
+  return CompletionPacket {
+    bank: lowerWid,
+    payload: tuple2(req, upperWid)
+  };
+endfunction
 
 interface Core;
   method ActionValue#(MemReq#(ThreadNum)) getDMemReq;
@@ -137,9 +119,10 @@ module mkCore(Core);
   // IF
   Fifo#(1, Warp) iMemReq <- mkBypassFifo(False, True);
   Reg#(Bool) lastIF <- mkReg(False);
+  FIFOF#(Tuple3#(Addr, Warp, RawInst)) rawIMemResp <- mkFIFOF;
   FIFOF#(Tuple3#(Addr, Warp, DecodedInst)) iMemResp <- mkFIFOF;
   // RF, WB
-  Vector#(2, VectorRFile#(ThreadNum)) rfs <- replicateM(mkVectorRFile);
+  Vector#(BankNum, VectorRFile#(ThreadNum)) rfs <- replicateM(mkVectorRFile);
   // EX
   let alus <- mkVectorAlu;
   // MUL
@@ -158,52 +141,48 @@ module mkCore(Core);
 
   let warps <- mkWarps;
   FIFOF#(Warp) ifOut <- mkGFIFOF(False, True);
-  Vector#(2, Scoreboard) scoreboards <- replicateM(mkScoreboard);
-  // from RF, EX, MEM, CSR, START
-  let rfIn <- mkRfIn;
-  Vector#(2, FIFOF#(Tuple2#(RFWrReq#(ThreadNum), Bit#(TSub#(LogWarpNum, 1))))) wbs <- replicateM(mkLFIFOF);
-  Vector#(2, FIFOF#(Tuple3#(Bit#(ThreadNum), Data, Bit#(TSub#(LogWarpNum, 1))))) startWbs <- replicateM(mkLFIFOF);
-  Vector#(2, FIFOF#(RFCont)) rfOut <- replicateM(mkGFIFOF(False, True));
-  // from RF
-  let schedIn <- mkSchedIn;
-  // from RF
-  let exIn <- mkExIn;
+  Vector#(BankNum, Scoreboard) scoreboards <- replicateM(mkScoreboard);
+  // Remote completions enter one source-local queue per producer and traverse
+  // a registered switch.  J/AUIPC writebacks stay local to their RF bank.
+  let completions <- mkCompletionNetwork;
+  Vector#(BankNum, Fifo#(2, CompletionPayload)) localWbs <-
+    replicateM(mkLocalWritebackQ);
+  Vector#(BankNum, Reg#(Bool)) preferRemoteWb <- replicateM(mkReg(True));
+  Vector#(BankNum, FIFOF#(Tuple3#(Bit#(ThreadNum), Data, Bit#(LocalWarpNum)))) startWbs <- replicateM(mkLFIFOF);
+  Vector#(BankNum, FIFOF#(RFCont)) rfOut <- replicateM(mkGFIFOF(False, True));
+  // One source-local dispatch queue per RF bank replaces the wide collection
+  // of destination-resident execution-unit MergeTree inputs.
+  let issues <- mkIssueNetwork;
   Fifo#(3, EXCont) exOut <- mkCFFifo(True, False);
-  // from RF
-  let mulIn <- mkMulIn;
+  Fifo#(2, EXResult) exResults <- mkEXResultQ;
+  Fifo#(2, CallInput) callInputs <- mkCallInputQ;
   Fifo#(4, WBCont) mulOut <- mkLatencyFifo(True, False);
-  // from RF
-  let divIn <- mkDivIn;
   Fifo#(TAdd#(1, DivStage), WBCont) divOut <- mkLatencyFifo(True, False);
-  // from RF
-  let fpuIn <- mkFpuIn;
-  Fifo#(8, WBCont) fpuOut <- mkCFFifo(True, False);
-  Vector#(2, Fifo#(8, Vector#(ThreadNum, Data))) stData <- replicateM(mkBRAMFifo(True, False));
-  // from RF
-  let brIn <- mkBrIn;
+  // Splitting FMA pre-alignment and post-multiply normalization adds two
+  // in-flight stages.
+  Fifo#(10, WBCont) fpuOut <- mkCFFifo(True, False);
+  Vector#(BankNum, Fifo#(8, Vector#(ThreadNum, Data))) stData <- replicateM(mkBRAMFifo(True, False));
+  function Bool stDataBankNotEmpty(Integer i) = stData[i].notEmpty;
+  Vector#(BankNum, Bool) stDataNotEmpty = genWith(stDataBankNotEmpty);
   Fifo#(3, BRCont) brOut <- mkCFFifo(True, False);
-  // from EX
-  let memIn <- mkMemIn;
+  // The memory request has one producer, so it needs a registered point-to-
+  // point queue rather than a one-input MergeTree.
+  Fifo#(2, MemIssue) memIn <- mkMemIssueQ;
   Fifo#(32, MEMCont) memOut <- mkBRAMFifo(True, False);
-  // from RF
-  let csrIn <- mkCsrIn;
   FIFOF#(WBCont) csrOut <- mkGFIFOF(False, True);
 
   // signal error
   FIFOF#(void) error <- mkFIFOF;
-
-  let logWarpNum = valueOf(LogWarpNum);
 
   (* fire_when_enabled *)
   rule do_IF(warps.notFull || iMemReq.notFull);
     Bool selected = warpIn[0].notEmpty || warpIn[1].notEmpty;
     Bool iMemReq_notFull = iMemReq.notFull;
     Bool warps_notEmpty = warps.notEmpty;
-    Bool warps_notFull = warps.notFull;
     if (printDebug)
       if (selected || (iMemReq_notFull && warps_notEmpty)) $display("do_IF");
     Warp warp = ?;
-    // select warpIn to clear
+
     if ((lastIF || !warpIn[1].notEmpty) && warpIn[0].notEmpty) begin
       warp = warpIn[0].first;
       warpIn[0].deq;
@@ -214,16 +193,23 @@ module mkCore(Core);
       lastIF <= True;
     end
 
-    // enq to iMemReq
     if (iMemReq_notFull && (warps_notEmpty || selected)) begin
       iMemReq.enq(warps_notEmpty ? warps.first : warp);
       if (warps_notEmpty) warps.deq;
     end
 
-    // enq to warps
     if (selected && (!iMemReq_notFull || warps_notEmpty)) begin
       warps.enq(warp);
     end
+  endrule
+
+  // Register the raw instruction before full decode. The sequential successor
+  // is still generated in putIMemResp, so this stage does not enter or
+  // lengthen the one-warp PC+4 fetch recurrence.
+  (* fire_when_enabled *)
+  rule decode_IF;
+    match {.pc, .warp, .rawInst} <- toGet(rawIMemResp).get;
+    iMemResp.enq(tuple3(pc, warp, decode(rawInst)));
   endrule
 
   (* fire_when_enabled *)
@@ -252,8 +238,9 @@ module mkCore(Core);
     $fflush(stdout);
 
     let takenPc = pc + imm;
-    let lowerWid = wid[0];
-    Bit#(TSub#(LogWarpNum, 1)) upperWid = wid[logWarpNum-1 : 1];
+    Bit#(1) interleave = truncate(wid);
+    Bit#(LogBankNum) lowerWid = truncate(wid);
+    Bit#(LocalWarpNum) upperWid = truncateLSB(wid);
 
     let rdReq = RFRdReq {conv: conv, rs1: rs1, rs2: rs2, rs3: rs3};
     let rfCont = RFCont {
@@ -272,7 +259,7 @@ module mkCore(Core);
 
     // enq into warpIn
     if (iType == J)
-      warpIn[lowerWid].iport[0].put(Warp {mask: mask, wid: wid, pc: takenPc});
+      warpIn[interleave].iport[0].put(Warp {mask: mask, wid: wid, pc: takenPc});
 
     case (iType)
       // signal error
@@ -286,20 +273,15 @@ module mkCore(Core);
     iMemResp.deq;
   endrule
 
-  for (Integer i = 0; i < 2; i = i + 1) begin
-    (* fire_when_enabled *)
-    rule do_WB;
-      if (printDebug)
-        $display("pull_WB%0d", i);
-      wbs[i].enq(rfIn[i].first);
-      rfIn[i].deq;
-    endrule
-
+  for (Integer i = 0; i < valueOf(BankNum); i = i + 1) begin
     (* fire_when_enabled *)
     rule do_RF;
       match {.rdReq, .cont} = scoreboards[i].first;
       match RFCont {iType: .iType, warp: .warp, takenPc: .takenPc, dst: .dst} = cont;
       let noRd = iType == J || iType == Auipc;
+      Bool remoteReady = completions.egress[i].notEmpty;
+      Bool localReady = localWbs[i].notEmpty;
+      Bool takeRemote = remoteReady && (!localReady || preferRemoteWb[i]);
 
       if (startWbs[i].notEmpty) begin
         match {.mask, .top, .wid} <- toGet(startWbs[i]).get;
@@ -307,12 +289,22 @@ module mkCore(Core);
           conv: True, rd: unpack(0), mask: mask, datas: replicate(top)
         };
         rfs[i].ask(fromWrReq(wrReq), wid);
-      end else if (wbs[i].notEmpty) begin
+      end else if (takeRemote) begin
         if (printDebug)
-          $display("WB%0d", i);
-        match {.wrReq, .wid} <- toGet(wbs[i]).get;
+          $display("remote WB%0d", i);
+        match {.wrReq, .wid} = completions.egress[i].first;
         rfs[i].ask(fromWrReq(wrReq), wid);
         scoreboards[i].deq(True, wid, wrReq.rd);
+        completions.egress[i].deq;
+        preferRemoteWb[i] <= False;
+      end else if (localReady) begin
+        if (printDebug)
+          $display("local WB%0d", i);
+        match {.wrReq, .wid} = localWbs[i].first;
+        rfs[i].ask(fromWrReq(wrReq), wid);
+        scoreboards[i].deq(True, wid, wrReq.rd);
+        localWbs[i].deq;
+        preferRemoteWb[i] <= True;
       end else if (scoreboards[i].notEmpty && (noRd || rfs[i].notFull)) begin
         if (printDebug)
           $display("do_RF%0d", i);
@@ -322,10 +314,10 @@ module mkCore(Core);
           mask: warp.mask,
           datas: replicate(iType == J ? warp.pc : takenPc)
         };
-        let upperWid = warp.wid[logWarpNum-1 : 1];
+        Bit#(LocalWarpNum) upperWid = truncateLSB(warp.wid);
 
         if (noRd) begin
-          rfIn[i].iport[0].put(tuple2(wrReq, upperWid));
+          localWbs[i].enq(tuple2(wrReq, upperWid));
         end else begin
           rfs[i].ask(fromRdReq(rdReq), upperWid);
           rfOut[i].enq(cont);
@@ -390,23 +382,23 @@ module mkCore(Core);
       FpuReq#(ThreadNum) fpuReq = FpuReq {f: fpuFunc, v1: rv1, v2: rv2, v3: rv3};
 
       case (iType)
-        Alu, Jr: exIn.iport[i].put(tuple2(exReq, exCont));
-        Sched: schedIn.iport[i].put(schedReq);
+        Alu, Jr: issues.ingress[i].put(tagged ToEX tuple2(exReq, exCont));
+        Sched: issues.ingress[i].put(tagged ToSCHED schedReq);
         MulDiv :
           if (mFunc.isDiv) begin
             DivReq#(ThreadNum) divReq = DivReq{f: mFunc.mOp, v1: rv1, v2: rv2};
-            divIn.iport[i].put(tuple2(divReq, wbCont));
+            issues.ingress[i].put(tagged ToDIV tuple2(divReq, wbCont));
           end else begin
             MulReq#(ThreadNum) mulReq = MulReq{f: mFunc.mOp, v1: rv1, v2: rv2};
-            mulIn.iport[i].put(tuple2(mulReq, wbCont));
+            issues.ingress[i].put(tagged ToMUL tuple2(mulReq, wbCont));
           end
         Ld, St: begin
-          exIn.iport[i].put(tuple2(exReq, exCont));
+          issues.ingress[i].put(tagged ToEX tuple2(exReq, exCont));
           stData[i].enq(rv2);
         end
-        Br: brIn.iport[i].put(tuple2(brReq, brCont));
-        Csr: csrIn.iport[i].put(tuple2(csrReq, wbCont));
-        Fpu: fpuIn.iport[i].put(tuple2(fpuReq, wbCont));
+        Br: issues.ingress[i].put(tagged ToBR tuple2(brReq, brCont));
+        Csr: issues.ingress[i].put(tagged ToCSR tuple2(csrReq, wbCont));
+        Fpu: issues.ingress[i].put(tagged ToFPU tuple2(fpuReq, wbCont));
       endcase
 
       rfOut[i].deq;
@@ -417,50 +409,58 @@ module mkCore(Core);
   rule do_EX;
     if (printDebug)
       $display("do_EX");
-    match {.req, .cont} = exIn.first;
+    match {.req, .cont} = issues.ex.first;
     alus.enq(req);
     exOut.enq(cont);
-    exIn.deq;
+    issues.ex.deq;
   endrule
 
   (* fire_when_enabled *)
   rule do_MUL;
     if (printDebug)
       $display("do_MUL");
-    match {.req, .cont} = mulIn.first;
+    match {.req, .cont} = issues.mul.first;
     muls.enq(req);
     mulOut.enq(cont);
-    mulIn.deq;
+    issues.mul.deq;
   endrule
 
   (* fire_when_enabled *)
   rule do_DIV;
     if (printDebug)
       $display("do_DIV");
-    match {.req, .cont} = divIn.first;
+    match {.req, .cont} = issues.divide.first;
     divs.enq(req);
     divOut.enq(cont);
-    divIn.deq;
+    issues.divide.deq;
   endrule
 
   (* fire_when_enabled *)
   rule do_FPU;
     if (printDebug)
       $display("do_FPU");
-    match {.req, .cont} = fpuIn.first;
+    match {.req, .cont} = issues.fpu.first;
     fpus.exec(req.f, RNE, req.v1, req.v2, req.v3);
     fpuOut.enq(cont);
-    fpuIn.deq;
+    issues.fpu.deq;
   endrule
 
   (* fire_when_enabled *)
   rule cont_EX;
     if (printDebug)
       $display("cont_EX");
-    match EXCont {warp: .warp, iType: .iType, isMask: .isMask, memMask: .memMask, dst: .dst} = exOut.first;
-    let res = alus.first;
-    let lowerWid = warp.wid[0];
-    let upperWid = warp.wid[logWarpNum-1 : 1];
+    exResults.enq(tuple2(alus.first, exOut.first));
+    alus.deq;
+    exOut.deq;
+  endrule
+
+  // Finish the ALU side effects from a local result queue.  Neither the
+  // register-file bank nor the CoalTree can now gate the ALU response queue.
+  (* fire_when_enabled *)
+  rule distribute_EX(exResults.notEmpty);
+    match {.res, .cont} = exResults.first;
+    match EXCont {warp: .warp, iType: .iType, isMask: .isMask, memMask: .memMask, dst: .dst} = cont;
+    Bit#(LogBankNum) lowerWid = truncate(warp.wid);
 
     RFWrReq#(ThreadNum) rfReq = RFWrReq {
       conv: False, rd: dst, mask: warp.mask,
@@ -487,17 +487,22 @@ module mkCore(Core);
 
     case (iType)
       Alu, Jr: begin
-        rfIn[lowerWid].iport[1].put(tuple2(rfReq, upperWid));
-        if (iType == Jr) call.enq(genWith(genCall));
+        completions.putEX(makeCompletionPacket(warp, rfReq));
+        if (iType == Jr) callInputs.enq(genWith(genCall));
       end
       default: begin
-        memIn.iport[0].put(tuple2(memReq, memCont));
+        memIn.enq(tuple2(memReq, memCont));
         stData[lowerWid].deq;
       end
     endcase
 
-    alus.deq;
-    exOut.deq;
+    exResults.deq;
+  endrule
+
+  (* fire_when_enabled *)
+  rule feed_CALL(callInputs.notEmpty);
+    call.enq(callInputs.first);
+    callInputs.deq;
   endrule
 
   (* fire_when_enabled *)
@@ -506,14 +511,11 @@ module mkCore(Core);
       $display("cont_MUL");
     match WBCont {warp: .warp, dst: .dst} = mulOut.first;
     let res = muls.first;
-    let lowerWid = warp.wid[0];
-    let upperWid = warp.wid[logWarpNum-1 : 1];
-
     RFWrReq#(ThreadNum) rfReq = RFWrReq {
       conv: False, rd: dst, mask: warp.mask, datas: res
     };
 
-    rfIn[lowerWid].iport[2].put(tuple2(rfReq, upperWid));
+    completions.putMUL(makeCompletionPacket(warp, rfReq));
     muls.deq;
     mulOut.deq;
   endrule
@@ -524,14 +526,11 @@ module mkCore(Core);
       $display("cont_DIV");
     match WBCont {warp: .warp, dst: .dst} = divOut.first;
     let res = divs.first;
-    let lowerWid = warp.wid[0];
-    let upperWid = warp.wid[logWarpNum-1 : 1];
-
     RFWrReq#(ThreadNum) rfReq = RFWrReq {
       conv: False, rd: dst, mask: warp.mask, datas: res
     };
 
-    rfIn[lowerWid].iport[3].put(tuple2(rfReq, upperWid));
+    completions.putDIV(makeCompletionPacket(warp, rfReq));
     divs.deq;
     divOut.deq;
   endrule
@@ -543,14 +542,11 @@ module mkCore(Core);
     match WBCont {warp: .warp, dst: .dst} = fpuOut.first;
     let res = fpus.result_data;
     function Data f (FpuResult x) = truncate(x.data);
-    let lowerWid = warp.wid[0];
-    let upperWid = warp.wid[logWarpNum-1 : 1];
-
     RFWrReq#(ThreadNum) rfReq = RFWrReq {
       conv: False, rd: dst, mask: warp.mask, datas: map(f, res)
     };
 
-    rfIn[lowerWid].iport[4].put(tuple2(rfReq, upperWid));
+    completions.putFPU(makeCompletionPacket(warp, rfReq));
     fpus.result_deq;
     fpuOut.deq;
   endrule
@@ -559,10 +555,10 @@ module mkCore(Core);
   rule do_BR;
     if (printDebug)
       $display("do_BR");
-    match {.req, .cont} = brIn.first;
+    match {.req, .cont} = issues.bru.first;
     brus.enq(req);
     brOut.enq(cont);
-    brIn.deq;
+    issues.bru.deq;
   endrule
 
   (* fire_when_enabled *)
@@ -575,8 +571,9 @@ module mkCore(Core);
     let nTMask = warp.mask & ~pack(res);
     let tWarp = Warp {mask: tMask, wid: warp.wid, pc: takenPc};
     let nTWarp = Warp {mask: nTMask, wid: warp.wid, pc: warp.pc};
-    if (tMask != 0) warpIn[warp.wid[0]].iport[1].put(tWarp);
-    if (nTMask != 0) warpIn[warp.wid[0]].iport[2].put(nTWarp);
+    Bit#(1) interleave = truncate(warp.wid);
+    if (tMask != 0) warpIn[interleave].iport[1].put(tWarp);
+    if (nTMask != 0) warpIn[interleave].iport[2].put(nTWarp);
     brus.deq;
     brOut.deq;
   endrule
@@ -589,11 +586,12 @@ module mkCore(Core);
     if (printDebug)
       $display("pc from CALL: %x", pc);
     let warp = Warp {mask: mask, wid: wid, pc: pc};
-    warpIn[wid[0]].iport[3].put(warp);
+    Bit#(1) interleave = truncate(wid);
+    warpIn[interleave].iport[3].put(warp);
     call.deq;
   endrule
 
-  method ActionValue#(MemReq#(ThreadNum)) getDMemReq;
+  method ActionValue#(MemReq#(ThreadNum)) getDMemReq if (memIn.notEmpty);
     match {.req, .cont} = memIn.first;
     if (!req.write) memOut.enq(cont);
     memIn.deq;
@@ -610,17 +608,17 @@ module mkCore(Core);
   endmethod
 
   method ActionValue#(CsrReq#(ThreadNum)) getCsrReq;
-    match {.req, .cont} = csrIn.first;
+    match {.req, .cont} = issues.csr.first;
     csrOut.enq(cont);
-    csrIn.deq;
+    issues.csr.deq;
 
     return req;
   endmethod
 
   method ActionValue#(SchedReq) getSchedReq
-    if (!stData[0].notEmpty && !stData[1].notEmpty && !memIn.notEmpty && !csrIn.notEmpty);
-    let req = schedIn.first;
-    schedIn.deq;
+    if (pack(stDataNotEmpty) == 0 && !memIn.notEmpty && !issues.csrPending);
+    let req = issues.sched.first;
+    issues.sched.deq;
 
     return req;
   endmethod
@@ -638,52 +636,47 @@ module mkCore(Core);
       return isWord ? word :
         (isHalf ? {halfUpper, word[15:0]} : {byteUpper, word[7:0]});
     endfunction
-    let lowerWid = warp.wid[0];
-    let upperWid = warp.wid[logWarpNum-1 : 1];
     RFWrReq#(ThreadNum) rfReq = RFWrReq {
       conv: False, rd: dst, mask: warp.mask, datas: genWith(genData)
     };
-    rfIn[lowerWid].iport[5].put(tuple2(rfReq, upperWid));
+    completions.putMEM(makeCompletionPacket(warp, rfReq));
     memOut.deq;
   endmethod
 
   method Action putIMemResp(Data resp);
     match Warp {mask: .mask, wid: .wid, pc: .pc} = ifOut.first;
     let warp = Warp {mask: mask, wid: wid, pc: pc + 4};
+    Bit#(1) interleave = truncate(wid);
     case (resp[6 : 2])
       opJal, opJalr, opBranch, opSched: noAction;
-      default: warpIn[wid[0]].iport[5].put(warp);
+      default: warpIn[interleave].iport[5].put(warp);
     endcase
-    let dInst = decode(resp);
-    iMemResp.enq(tuple3(pc, warp, dInst));
+    rawIMemResp.enq(tuple3(pc, warp, resp));
     ifOut.deq;
   endmethod
 
   method Action putCsrResp(CsrResp#(ThreadNum) resp);
     match WBCont {warp: .warp, dst: .dst} = csrOut.first;
-    let lowerWid = warp.wid[0];
-    let upperWid = warp.wid[logWarpNum-1 : 1];
     RFWrReq#(ThreadNum) rfReq = RFWrReq {
       conv: False, rd: dst, mask: warp.mask, datas: resp.datas
     };
-    rfIn[lowerWid].iport[6].put(tuple2(rfReq, upperWid));
+    completions.putCSR(makeCompletionPacket(warp, rfReq));
     csrOut.deq;
   endmethod
 
   method Action start(SchedResp resp);
     match SchedResp {warp: .warp, write: .write, top: .top} = resp;
-    let lowerWid = warp.wid[0];
-    let upperWid = warp.wid[logWarpNum-1 : 1];
+    Bit#(1) interleave = truncate(warp.wid);
+    Bit#(LogBankNum) lowerWid = truncate(warp.wid);
+    Bit#(LocalWarpNum) upperWid = truncateLSB(warp.wid);
     if (write) startWbs[lowerWid].enq(tuple3(warp.mask, top, upperWid));
-    warpIn[lowerWid].iport[4].put(warp);
+    warpIn[interleave].iport[4].put(warp);
   endmethod
 
 endmodule
 
 module mkProc(Proc);
   let core <- mkCore;
-  // IF
-  let iMem <- mkIMemoryRouter;
   // MEM
   let dMem <- mkDMemoryRouter;
   // CSR
@@ -699,29 +692,6 @@ module mkProc(Proc);
   FIFOF#(Data) numCycles <- mkUGFIFOF;
   FIFOF#(Data) numInsns <- mkUGFIFOF;
   FIFOF#(void) done <- mkGFIFOF(False, True);
-
-  (* fire_when_enabled *)
-  rule process_iMem;
-    if (printDebug)
-      $display("process_iMem");
-    match Warp {pc: .pc, mask: .mask} <- core.getIMemReq;
-    csrf.newInst(countOnes(mask));
-    MemoryRequest#(AddrSz, DataSz) req = MemoryRequest{
-      write: False,
-      byteen: ?,
-      address: pc,
-      data: ?
-    };
-    iMem.request.put(req);
-  endrule
-
-  (* fire_when_enabled *)
-  rule answer_iMem;
-    if (printDebug)
-      $display("answer_iMem");
-    let resp <- iMem.response.get;
-    core.putIMemResp(resp.data);
-  endrule
 
   (* fire_when_enabled *)
   rule process_dMem;
@@ -830,7 +800,32 @@ module mkProc(Proc);
     started <= True;
   endmethod
 
-  interface iMemClient = iMem.iMemClient;
+  // Forward instruction-memory traffic directly. The old mkIMemoryRouter put
+  // request and response bypass FIFOs between one producer and one consumer.
+  interface MemoryClient iMemClient;
+    interface Get request;
+      method ActionValue#(MemoryRequest#(AddrSz, DataSz)) get;
+        if (printDebug)
+          $display("process_iMem");
+        match Warp {pc: .pc, mask: .mask} <- core.getIMemReq;
+        csrf.newInst(countOnes(mask));
+        return MemoryRequest {
+          write: False,
+          byteen: ?,
+          address: pc,
+          data: ?
+        };
+      endmethod
+    endinterface
+
+    interface Put response;
+      method Action put(MemoryResponse#(DataSz) resp);
+        if (printDebug)
+          $display("answer_iMem");
+        core.putIMemResp(resp.data);
+      endmethod
+    endinterface
+  endinterface
   interface dMemClient = dMem.dMemClient;
 endmodule
 

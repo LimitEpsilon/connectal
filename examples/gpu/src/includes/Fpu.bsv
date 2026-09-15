@@ -1,4 +1,4 @@
-// Fpu.bsv
+// Fpu2.bsv
 // Single-precision vector floating-point unit built from the Berkeley
 // HardFloat modules in includes/hardfloat.
 //
@@ -63,6 +63,11 @@ typedef struct {
 } MulAddArg deriving (Bits, Eq, FShow);
 
 typedef struct {
+  Bit#(3)                           rm;
+  MulAddPreMulMid#(FpExpW, FpSigW) mid;
+} MulAddAlign deriving (Bits, Eq);
+
+typedef struct {
   Bit#(3)                        rm;
   Bit#(FpSigW)                   mulA;
   Bit#(FpSigW)                   mulB;
@@ -71,10 +76,28 @@ typedef struct {
 } MulAddPre deriving (Bits, Eq);
 
 typedef struct {
+  Bit#(3)                        rm;
+  Bit#(TAdd#(FpSigW, FpSigW))    prod;
+  Bit#(TAdd#(FpSigW, FpSigW))    addend;
+  MulAddInterIo#(FpExpW, FpSigW) inter;
+} MulAddMul deriving (Bits, Eq);
+
+typedef struct {
   Bit#(3)                               rm;
   Bit#(TAdd#(TAdd#(FpSigW, FpSigW), 1)) prod;
   MulAddInterIo#(FpExpW, FpSigW)        inter;
 } MulAddProd deriving (Bits, Eq);
+
+typedef struct {
+  Bit#(3)                            rm;
+  MulAddPostMulMid#(FpExpW, FpSigW) mid;
+} MulAddPost deriving (Bits, Eq);
+
+typedef struct {
+  Bit#(3)                              rm;
+  Bool                                 invalidExc;
+  RawFloat#(FpExpW, TAdd#(2, FpSigW)) rawOut;
+} MulAddRaw deriving (Bits, Eq);
 
 // op[1] negates the product and op[0] negates the addend, so a*b+c, a*b-c,
 // -(a*b)+c and -(a*b)-c are one encoding apart.  The boundary between premul
@@ -83,20 +106,31 @@ typedef struct {
 (* synthesize *)
 module mkFloatMulAdd(Server#(MulAddArg, FpuRecResult));
   FIFOF#(MulAddArg)    argQ  <- mkFIFOF;
+  FIFOF#(MulAddAlign)  alignQ <- mkFIFOF;
   FIFOF#(MulAddPre)    preQ  <- mkFIFOF;
+  FIFOF#(MulAddMul)    mulQ  <- mkFIFOF;
   FIFOF#(MulAddProd)   prodQ <- mkFIFOF;
+  FIFOF#(MulAddPost)   postQ <- mkFIFOF;
+  FIFOF#(MulAddRaw)    rawQ  <- mkFIFOF;
   FIFOF#(FpuRecResult) outQ  <- mkFIFOF;
 
   RoundRawFNToRecFN#(FpExpW, FpSigW) roundRawToRecF32 = mkRoundRawFNToRecFN(0);
 
   (* fire_when_enabled *)
-  rule premul;
+  rule prepare_alignment;
     let x <- toGet(argQ).get;
     RawFloat#(FpExpW, FpSigW) rawA = rawFloatFromRecFN(x.a);
     RawFloat#(FpExpW, FpSigW) rawB = rawFloatFromRecFN(x.b);
     RawFloat#(FpExpW, FpSigW) rawC = rawFloatFromRecFN(x.c);
+    let mid = mulAddRawFN_preMul_prepare(x.op, rawA, rawB, rawC);
+    alignQ.enq(MulAddAlign {rm: x.rm, mid: mid});
+  endrule
+
+  (* fire_when_enabled *)
+  rule finish_alignment;
+    let x <- toGet(alignQ).get;
     match {.mulA, .mulB, .mulC, .inter} =
-      mulAddRawFN_preMul(x.op, rawA, rawB, rawC);
+      mulAddRawFN_preMul_finish(x.mid);
     preQ.enq(MulAddPre {
       rm: x.rm, mulA: mulA, mulB: mulB, mulC: mulC, inter: inter
     });
@@ -107,18 +141,43 @@ module mkFloatMulAdd(Server#(MulAddArg, FpuRecResult));
     let x <- toGet(preQ).get;
     Bit#(TAdd#(FpSigW, FpSigW)) mulProd =
       zeroExtend(x.mulA) * zeroExtend(x.mulB);
+    mulQ.enq(MulAddMul {
+      rm: x.rm, prod: mulProd, addend: x.mulC, inter: x.inter
+    });
+  endrule
+
+  (* fire_when_enabled *)
+  rule add_product;
+    let x <- toGet(mulQ).get;
     Bit#(TAdd#(TAdd#(FpSigW, FpSigW), 1)) mulAddResult =
-      zeroExtend(mulProd) + zeroExtend(x.mulC);
+      zeroExtend(x.prod) + zeroExtend(x.addend);
     prodQ.enq(MulAddProd { rm: x.rm, prod: mulAddResult, inter: x.inter });
   endrule
 
   (* fire_when_enabled *)
-  rule postmul;
+  rule prepare_postmul;
     let x <- toGet(prodQ).get;
+    let mid = mulAddRawFN_postMul_prepare(x.inter, x.prod, x.rm);
+    postQ.enq(MulAddPost {rm: x.rm, mid: mid});
+  endrule
+
+  (* fire_when_enabled *)
+  rule finish_postmul;
+    let x <- toGet(postQ).get;
     match {.invalidExc, .rawOut} =
-      mulAddRawFN_postMul(x.inter, x.prod, x.rm);
+      mulAddRawFN_postMul_finish(x.mid);
+    rawQ.enq(MulAddRaw {
+      rm: x.rm, invalidExc: invalidExc, rawOut: rawOut
+    });
+  endrule
+
+  (* fire_when_enabled *)
+  rule round;
+    let x <- toGet(rawQ).get;
     match {.rec, .exc} =
-      roundRawToRecF32(invalidExc, False, rawOut, x.rm, tininess_afterRounding);
+      roundRawToRecF32(
+        x.invalidExc, False, x.rawOut, x.rm, tininess_afterRounding
+      );
     outQ.enq(FpuRecResult { data: rec, fflags: pack(exc) });
   endrule
 
@@ -195,12 +254,26 @@ typedef struct {
   Bit#(32)     iv1;
 } SimpleArg deriving (Bits, Eq, FShow);
 
+typedef TAdd#(1, TLog#(32)) IntRawExpW;
+typedef RawFloat#(IntRawExpW, 32) IntRaw;
+
+typedef struct {
+  SimpleArg arg;
+  IntRaw    intRaw;
+} SimplePre deriving (Bits, Eq);
+
 (* noinline *)
-function FpuRecResult execFloatSimple(FpuFunc fpu_f, Bit#(3) fpu_rm, Bit#(RecFpW) rv1, Bit#(RecFpW) rv2, Bit#(32) iv1);
+function FpuRecResult execFloatSimplePost(
+    FpuFunc fpu_f, Bit#(3) fpu_rm,
+    Bit#(RecFpW) rv1, Bit#(RecFpW) rv2, Bit#(32) iv1,
+    IntRaw intRaw);
     CompareRecFN#(FpExpW, FpSigW) compareRecF32 = mkCompareRecFN;
     ClassifyRecFN#(FpExpW, FpSigW) classifyRecF32 = classifyRecFN;
-    function INToRecFN#(32, FpExpW, FpSigW) iN32ToRecF32(Bool signedOp) = mkINToRecFN(signedOp);
     function RecFNToIN#(FpExpW, FpSigW, 32) recF32ToIN32(Bool signedOp) = mkRecFNToIN(signedOp);
+    RoundAnyRawFNToRecFN#(IntRawExpW, 32, FpExpW, FpSigW) roundIntToRecF32 =
+      mkRoundAnyRawFNToRecFN(
+        flRoundOpt_sigMSBitAlwaysZero | flRoundOpt_neverUnderflows
+      );
 
     Bit#(RecFpW) dst = ?;
     Exception e = unpack(0);
@@ -210,7 +283,9 @@ function FpuRecResult execFloatSimple(FpuFunc fpu_f, Bit#(3) fpu_rm, Bit#(RecFpW
 
     match CompareRes {lt: .lt, eq: .eq, gt: .gt, fflags: Exception {invalid_op: .cmp_invalid}} = compareRecF32(rv1, rv2, False);
     match {.int_res, .int_exc} = recF32ToIN32(fpu_f == FCvt_WF, rv1, fpu_rm);
-    match {.float_res, .float_exc} = iN32ToRecF32(fpu_f == FCvt_FW, iv1, fpu_rm, tininess_afterRounding);
+    match {.float_res, .float_exc} = roundIntToRecF32(
+      False, False, intRaw, fpu_rm, tininess_afterRounding
+    );
 
     // Fpu Decoding
     case (fpu_f)
@@ -267,12 +342,22 @@ endfunction
 (* synthesize *)
 module mkFloatSimple (Server#(SimpleArg, FpuRecResult));
   FIFOF#(SimpleArg)    argQ <- mkFIFOF;
+  FIFOF#(SimplePre)    preQ <- mkFIFOF;
   FIFOF#(FpuRecResult) outQ <- mkFIFOF;
 
   (* fire_when_enabled *)
-  rule exec_simple;
+  rule prepare_simple;
     let x <- toGet(argQ).get;
-    outQ.enq(execFloatSimple(x.f, x.rm, x.rv1, x.rv2, x.iv1));
+    IntRaw intRaw = rawFloatFromIN(x.f == FCvt_FW, x.iv1);
+    preQ.enq(SimplePre {arg: x, intRaw: intRaw});
+  endrule
+
+  (* fire_when_enabled *)
+  rule exec_simple;
+    let x <- toGet(preQ).get;
+    outQ.enq(execFloatSimplePost(
+      x.arg.f, x.arg.rm, x.arg.rv1, x.arg.rv2, x.arg.iv1, x.intRaw
+    ));
   endrule
 
   interface Put request = toPut(argQ);

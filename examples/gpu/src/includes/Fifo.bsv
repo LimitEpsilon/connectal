@@ -291,6 +291,56 @@ module mkBRAMFifo#(Bool guardEnq, Bool guardDeq) (Fifo#(n, t))
   endmethod
 endmodule
 
+// A BRAM FIFO whose visible head is held in a pipeline register. New values
+// enter the BRAM tail; whenever the front is free, the oldest tail value moves
+// into it. With a nonempty tail, a front dequeue and refill can occur in the
+// same cycle, so the FIFO still supplies one value per cycle. The extra front
+// storage does not change the reachable occupancy of users whose abstract
+// bound is n, but it removes BRAM clock-to-output delay from their consumer
+// path.
+//
+// This construction uses only ordinary FIFO interfaces. In particular, it
+// introduces no new RWire-based scheduling protocol for clients to reproduce.
+module mkFrontBRAMFifo#(Bool guardEnq, Bool guardDeq) (Fifo#(n, t))
+  provisos (Bits#(t, tSz), Log#(n, l), Add#(1, l, d));
+
+  // Only the refill rule writes the register front. Keeping a single writer
+  // makes its scheduling independent of the client's enqueue/dequeue rule.
+  FIFOF#(t) front <- mkUGFIFOF;
+  Fifo#(n, t) tail <- mkBRAMFifo(False, True);
+
+  (* fire_when_enabled *)
+  rule refill(front.notFull && tail.notEmpty);
+    front.enq(tail.first);
+    tail.deq;
+  endrule
+
+  // Keep notFull independent of the consumer-side dequeue. This avoids a
+  // WILL_FIRE-to-CAN_FIRE loop in clients that both inspect notFull and deq.
+  Bool canEnq = tail.notFull;
+
+  method Bool notFull = tail.notFull;
+
+  method Action enq(t x) if (!guardEnq || canEnq);
+    tail.enq(x);
+  endmethod
+
+  method Bool notEmpty = front.notEmpty;
+
+  method Action deq if (!guardDeq || front.notEmpty);
+    front.deq;
+  endmethod
+
+  method t first if (!guardDeq || front.notEmpty);
+    return front.first;
+  endmethod
+
+  method Action clear;
+    front.clear;
+    tail.clear;
+  endmethod
+endmodule
+
 module mkLatencyFifo#(Bool guardEnq, Bool guardDeq) (Fifo#(n, t)) provisos (Bits#(t, tSz), Add#(subn, 2, n));
   FIFOF#(t) frontStage <- mkGFIFOF(!guardEnq, False);
   Vector#(subn, FIFOF#(t)) middle <- replicateM(mkLFIFOF);

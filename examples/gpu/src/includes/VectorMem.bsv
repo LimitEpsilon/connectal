@@ -65,8 +65,8 @@ module mkVecMemoryServer#(MemoryServer#(h, w8) m) (VecMemoryServer#(n, a, d) ifc
   // CoalReq → CoalResp → MemoryRequest → MemoryResponse → enq to out
   CoalTree#(n, h, MemoryPayload#(w, subd)) c <- mkCoalTree(zipWith(merge));
   // final destination
-  Vector#(n, FIFOF#(Vector#(d, Byte))) out <- replicateM(mkLFIFOF);
-  Fifo#(24, Bit#(n)) outMasks <- mkPipelineFifo(True, True);
+  Vector#(n, FIFOF#(Vector#(d, Byte))) out <- replicateM(mkFIFOF);
+  Fifo#(24, Bit#(n)) outMasks <- mkCFFifo(True, True);
 
   // enq at CoalReq, deq at MemoryResponse
   Vector#(n, Fifo#(24, Bit#(w))) offsets <- replicateM(mkPipelineFifo(False, False)); // unguarded, stores address[w-1 : 0]

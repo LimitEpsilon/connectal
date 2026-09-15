@@ -71,14 +71,14 @@ instance Coalescer#(n, k, t) provisos (
     CoalTree#(hn, k, t) l <- mkCoalTree_(merge);
     CoalTree#(hm, k, t) r <- mkCoalTree_(merge);
     Reg#(CoalResp#(n, k, t)) out <- mkReg(CoalResp {mask: 0, kv: unpack(0)});
-    Reg#(Bool) rdy[3] <- mkCReg(3, False);
-    Reg#(Bool) epoch[2] <- mkCReg(2, False);
+    Reg#(Bool) rdy[2] <- mkCReg(2, False);
+    Reg#(Bool) epoch <- mkReg(False);
 
     (* fire_when_enabled, no_implicit_conditions *)
     rule get_result(!rdy[1]);
       let rdyL = l.notEmpty;
       let rdyR = r.notEmpty;
-      let e = epoch[0];
+      let e = epoch;
       let epochL = l.getEpoch;
       let epochR = r.getEpoch;
       let respL = l.first;
@@ -105,7 +105,7 @@ instance Coalescer#(n, k, t) provisos (
       if (rdyL) begin
         if (rdyR) begin
           if (epochL == epochR) begin // update epoch
-            epoch[0] <= epochL;
+            epoch <= epochL;
             if (respL.mask != 0 && respR.mask != 0) begin
               out <= sel;
               if (dir != GT) l.deq;
@@ -140,7 +140,7 @@ instance Coalescer#(n, k, t) provisos (
     method notEmpty = rdy[0];
 
     // method getEpoch = (empty[0] && epoch != epochL) ? epochR : epoch;
-    method getEpoch = epoch[0];
+    method getEpoch = epoch;
 
     method Action deq; rdy[0] <= False; endmethod // must be called under if (notEmpty)
 

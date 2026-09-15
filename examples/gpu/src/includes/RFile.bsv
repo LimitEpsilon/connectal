@@ -17,10 +17,12 @@ import FIFOF::*;
 import SpecialFIFOs::*;
 import Fifo::*;
 import BRAM::*;
+import Count::*;
 
-// (32 (GPR) + 32 (FPR)) * (number of warps) ÷ 2 registers per lane
-typedef TAdd#(5, LogWarpNum) LaneRIndxSz;
-typedef TAdd#(4, LogWarpNum) FPRIndxSz;
+// Each physical bank holds 64 architectural registers (GPR + FPR), or
+// 32 FPRs, for every local warp assigned to that bank.
+typedef TAdd#(6, LocalWarpNum) LaneRIndxSz;
+typedef TAdd#(5, LocalWarpNum) FPRIndxSz;
 typedef Bit#(LaneRIndxSz) LaneRIndx;
 typedef Bit#(FPRIndxSz) FPRIndx;
 typedef TExp#(LaneRIndxSz) RegPerLane;
@@ -72,7 +74,7 @@ typedef struct {
 } RFResp#(numeric type n) deriving (Bits, Eq, FShow);
 
 interface VectorRFile#(numeric type n);
-  method Action ask(RFReq#(n) req, Bit#(TSub#(LogWarpNum, 1)) wid);
+  method Action ask(RFReq#(n) req, Bit#(LocalWarpNum) wid);
   method Bool notFull;
   method ActionValue#(RFResp#(n)) ans;
 endinterface
@@ -96,7 +98,8 @@ endmodule
 module mkVecRFile(VectorRFile#(n));
   Vector#(n, BRAM2Port#(LaneRIndx, Data)) rfiles <- replicateM(mkRFileBRAM);
   Vector#(n, BRAM1Port#(FPRIndx, Data)) fpr <- replicateM(mkFPRBRAM);
-  FIFOF#(Tuple2#(RFReq#(n), Bit#(TSub#(LogWarpNum, 1)))) reqs <- mkLFIFOF;
+  // A non-loopy request FIFO cuts req_BRAM dequeue readiness out of ask.
+  FIFOF#(Tuple2#(RFReq#(n), Bit#(LocalWarpNum))) reqs <- mkFIFOF;
   FIFOF#(Bool) respAisZero <- mkUGFIFOF;
   FIFOF#(Vector#(n, Data)) respA <- mkFIFOF;
   FIFOF#(Bool) respBisZero <- mkUGFIFOF;
@@ -204,7 +207,7 @@ module mkVecRFile(VectorRFile#(n));
     respC.enq(resp);
   endrule
 
-  method Action ask(RFReq#(n) req, Bit#(TSub#(LogWarpNum, 1)) wid);
+  method Action ask(RFReq#(n) req, Bit#(LocalWarpNum) wid);
     reqs.enq(tuple2(req, wid));
     if (!req.write) begin
       respAisZero.enq(pack(req.rs1) == 0);
@@ -235,13 +238,12 @@ endmodule
 
 interface Scoreboard;
   method Action enq(RFRdReq req, RFCont cont);
-  method Action deq(Bool write, Bit#(TSub#(LogWarpNum, 1)) wid, RIndx rd);
+  method Action deq(Bool write, Bit#(LocalWarpNum) wid, RIndx rd);
   method Tuple2#(RFRdReq, RFCont) first;
   method Bool notEmpty;
   // method Action clear;
 endinterface
 
-typedef TDiv#(WarpNum, 2) WarpsPerBank;
 
 // The request/continuation pair plus the register bitmask decoded from it at
 // enq time, so enq_out's wakeup test is the single AND (pending & srcMask).
@@ -260,30 +262,92 @@ endmodule
 
 (* synthesize *)
 module mkScoreboard(Scoreboard);
-  // The CReg ports carry the intra-cycle schedule: first/notEmpty/deq use
-  // port 0, enq_out uses port 1, so enq_out sees deq's clear of out and its
-  // set of pending in the same cycle.  pending has to be a CReg for that: a
-  // plain register would let an enq_out firing in the cycle a read-deq retires
-  // pick a second entry from that lane against a pending that does not yet
-  // hold the retiring destination.
-  Reg#(Maybe#(Tuple2#(RFRdReq, RFCont))) out[2] <- mkCReg(2, tagged Invalid);
+  // Vortex-style scoreboard pipeline:
+  //
+  //   ibuf -> staged head -> registered ready -> cyclic grant -> out
+  //
+  // The hazard test and arbitration are in separate cycles.  The two-entry
+  // output queue lets arbitration continue while the register-file consumer
+  // drains the previous selection.
+  Fifo#(2, Tuple2#(RFRdReq, RFCont)) out <- mkCFFifo(False, False);
   Vector#(WarpsPerBank, Fifo#(4, SbEntry)) ibuf <- replicateM(mkScoreboardIport);
-  Vector#(WarpsPerBank, Array#(Reg#(Bit#(64)))) pending <- replicateM(mkCReg(2, 0));
+  Vector#(WarpsPerBank, Reg#(Maybe#(SbEntry))) staged
+    <- replicateM(mkReg(tagged Invalid));
+  Vector#(WarpsPerBank, Reg#(Bool)) ready <- replicateM(mkReg(False));
+
+  // Port 0 applies the writeback clear in the deq method.  The advance rule
+  // reads and writes port 1, so it sees that clear, applies a simultaneous
+  // destination reservation afterward, and computes replacement readiness
+  // from the resulting next-state mask.  Reservation therefore wins over a
+  // same-cycle clear, as in Vortex's inuse_regs_n update.
+  Vector#(WarpsPerBank, Array#(Reg#(Bit#(64)))) pending
+    <- replicateM(mkCReg(2, 0));
+
+  // Readiness uses a one-cycle-old snapshot of the architecturally current
+  // pending masks. This removes the same-cycle writeback-clear/completion path
+  // from the ready registers. A consumed warp is forced unready below, so a
+  // new reservation cannot be missed while the snapshot catches up.
+  Vector#(WarpsPerBank, Reg#(Bit#(64))) pendingForReady
+    <- replicateM(mkReg(0));
+
+  // Vortex's cyclic arbiter first tries this cursor.  If that lane is not
+  // ready, it falls back to the lowest ready lane.  countLSB is the balanced
+  // implementation used by the proved Rocq mkFindIndex netlist.
+  Reg#(Bit#(LocalWarpNum)) cursor <- mkReg(0);
 
   (* fire_when_enabled, no_implicit_conditions *)
-  rule enq_out(!isValid(out[1]));
-    Vector#(WarpsPerBank, Bool) isReady;
-    for (Integer i = 0; i < valueOf(WarpsPerBank); i = i + 1)
-      isReady[i] = ibuf[i].notEmpty && (pending[i][1] & ibuf[i].first.srcMask) == 0;
+  rule advance;
+    Vector#(WarpsPerBank, Bit#(64)) pendingNext;
+    Vector#(WarpsPerBank, Bool) requests;
+    for (Integer i = 0; i < valueOf(WarpsPerBank); i = i + 1) begin
+      pendingNext[i] = pending[i][1] & ~1;
+      requests[i] = isValid(staged[i]) && ready[i];
+    end
 
-    if (findIndex(id, isReady) matches tagged Valid .idx) begin
-      out[1] <= tagged Valid tuple2(ibuf[idx].first.req, ibuf[idx].first.cont);
-      ibuf[idx].deq;
+    Bit#(WarpsPerBank) requestBits = pack(requests);
+    Bool grantValid = out.notFull && requestBits != 0;
+    Bit#(LocalWarpNum) fallback = pack(countLSB(requestBits));
+    Bit#(LocalWarpNum) grant = requests[cursor] ? cursor : fallback;
+
+    if (grantValid) begin
+      match SbEntry {req: .req, cont: .cont} = fromMaybe(?, staged[grant]);
+      out.enq(tuple2(req, cont));
+      cursor <= grant + 1;
+    end
+
+    for (Integer i = 0; i < valueOf(WarpsPerBank); i = i + 1) begin
+      Bool consumed = grantValid && grant == fromInteger(i);
+      if (consumed) begin
+        let entry = fromMaybe(?, staged[i]);
+        Bit#(64) dstMask = (1 << pack(entry.cont.dst)) & ~1;
+        pendingNext[i] = pendingNext[i] | dstMask;
+      end
+
+      Maybe#(SbEntry) stageNext = staged[i];
+
+      if (consumed || !isValid(staged[i])) begin
+        if (ibuf[i].notEmpty) begin
+          stageNext = tagged Valid ibuf[i].first;
+          ibuf[i].deq;
+        end else begin
+          stageNext = tagged Invalid;
+        end
+      end
+
+      staged[i] <= stageNext;
+      if (consumed)
+        ready[i] <= False;
+      else if (stageNext matches tagged Valid .entry)
+        ready[i] <= (pendingForReady[i] & entry.srcMask) == 0;
+      else
+        ready[i] <= False;
+      pendingForReady[i] <= pendingNext[i] & ~1;
+      pending[i][1] <= pendingNext[i] & ~1;
     end
   endrule
 
   method Action enq(RFRdReq req, RFCont cont);
-    Bit#(TSub#(LogWarpNum, 1)) wid = cont.warp.wid[valueOf(LogWarpNum)-1 : 1];
+    Bit#(LocalWarpNum) wid = truncateLSB(cont.warp.wid);
     Bit#(64) dstMask = 1 << pack(cont.dst);
     Bit#(64) srcMask = (1 << pack(req.rs1))
                      | (req.conv ? 0 : (1 << pack(req.rs2)))
@@ -292,23 +356,19 @@ module mkScoreboard(Scoreboard);
     ibuf[wid].enq(SbEntry {req: req, cont: cont, srcMask: srcMask});
   endmethod
 
-  // pending is set when the continuation retires: the write branch clears rd,
-  // the read branch sets the retiring destination.
-  method Action deq(Bool write, Bit#(TSub#(LogWarpNum, 1)) wid, RIndx rd);
-    let ne = isValid(out[0]);
-    match {.*, .cont} = fromMaybe(?, out[0]);
-    let idx = write ? wid : cont.warp.wid[valueOf(LogWarpNum)-1 : 1];
-    let cur = pending[idx][0];
-    // if !write && !ne, (ne << cont.dst) == 0, so pending[idx] doesn't change;
-    // if cont.dst == 0, it is cleared out anyway
-    let nxt = write ? cur & ~(1 << pack(rd))
-                    : cur | (extend(pack(ne)) << pack(cont.dst));
-    pending[idx][0] <= nxt & ~1;
-    if (!write && ne)
-      out[0] <= tagged Invalid;
+  // A read dequeue removes an instruction already reserved by advance.
+  // Writeback clears through the early CReg port; advance observes that clear
+  // while computing pendingNext and the next registered readiness values.
+  method Action deq(Bool write, Bit#(LocalWarpNum) wid, RIndx rd);
+    if (write) begin
+      Bit#(64) clearMask = (1 << pack(rd)) & ~1;
+      pending[wid][0] <= pending[wid][0] & ~clearMask;
+    end else if (out.notEmpty) begin
+      out.deq;
+    end
   endmethod
 
-  method first = fromMaybe(?, out[0]);
-  method notEmpty = isValid(out[0]);
+  method first = out.first;
+  method notEmpty = out.notEmpty;
 endmodule
 

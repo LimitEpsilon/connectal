@@ -248,14 +248,36 @@ typedef struct {
   Bit#(n) rem;  // remainder
 } DivRes#(numeric type n) deriving (Bits, Eq, FShow);
 
-typedef function DivRes#(n) d(DivRes#(n) x) DivStep#(numeric type n);
+// The divider's original critical path ran from countMSB(rem), through the
+// shift-amount subtraction and barrel shifters, into the remainder subtractor.
+// Registering the shift amount cuts that path close to its routed midpoint.
+typedef struct {
+  DivRes#(n) res;
+  UInt#(TLog#(n)) shamt;
+} DivPreRes#(numeric type n) deriving (Bits, Eq, FShow);
 
-function DivRes#(n) divStep(DivRes#(n) x);
-  let vn = valueOf(n);
+typedef union tagged {
+  DivRes#(n) DivPreStage;
+  DivPreRes#(n) DivPostStage;
+} DivState#(numeric type n) deriving (Bits, Eq, FShow);
 
+typedef function DivPreRes#(n) d(DivRes#(n) x) DivStepPre#(numeric type n);
+typedef function DivRes#(n) d(DivPreRes#(n) x) DivStepPost#(numeric type n);
+
+function DivPreRes#(n) divStepPre(DivRes#(n) x);
   match DivRes {qneg: .qneg, rneg: .rneg, dExp: .dExp, quot: .quot, den: .den, rem: .rem} = x;
   let rExp = countMSB(rem); // rem = 2 ^ (n - rExp) * 1.xxxx...
   let shamt = dExp - rExp;
+
+  let done = den == 0 || rem < den;
+  x.done = done;
+  return DivPreRes {res: x, shamt: shamt};
+endfunction
+
+function DivRes#(n) divStepPost(DivPreRes#(n) x);
+  match DivPreRes {res: .res, shamt: .shamt} = x;
+  match DivRes {done: .done, qneg: .qneg, rneg: .rneg, dExp: .dExp,
+                quot: .quot, den: .den, rem: .rem} = res;
   Bit#(n) quotShift = 1 << shamt;
   let denShift = den << shamt;
 
@@ -265,7 +287,6 @@ function DivRes#(n) divStep(DivRes#(n) x);
   let rem2 = rem - (denShift >> 1);
   Bool rem1Neg = unpack(msb(rem1));
 
-  let done = den == 0 || rem < den;
   if (!done) quot = rem1Neg ? quot2 : quot1;
   if (!done) rem = rem1Neg ? rem2 : rem1;
   return DivRes {done: done, qneg: qneg, rneg: rneg, dExp: dExp, quot: quot, den: den, rem: rem};
@@ -273,26 +294,51 @@ endfunction
 
 typedef 4 DivStage;
 
-module mkDivider#(DivStep#(n) step) (Divider#(n));
-  Vector#(DivStage, DivStep#(n)) divs = replicate(step);
-  Vector#(DivStage, Reg#(Maybe#(DivRes#(n)))) res <- replicateM(mkReg(tagged Invalid));
+module mkDivider#(DivStepPre#(n) stepPre, DivStepPost#(n) stepPost) (Divider#(n));
+  Vector#(DivStage, DivStepPre#(n)) divsPre = replicate(stepPre);
+  Vector#(DivStage, DivStepPost#(n)) divsPost = replicate(stepPost);
+  Vector#(DivStage, Reg#(Maybe#(DivState#(n)))) res <- replicateM(mkReg(tagged Invalid));
   Fifo#(2, Tuple2#(Bit#(n), Bit#(n))) out <- mkCFFifo(False, False);
   RWire#(DivRes#(n)) enqReq <- mkRWire;
 
-  function DivRes#(n) genDiv(Integer i) = divs[i](fromMaybe(?, res[i]));
+  function DivState#(n) genDiv(Integer i);
+    case (fromMaybe(?, res[i])) matches
+      tagged DivPreStage .r: return tagged DivPostStage divsPre[i](r);
+      tagged DivPostStage .r: return tagged DivPreStage divsPost[i](r);
+    endcase
+  endfunction
+
+  function Bool divDone(Integer i);
+    case (fromMaybe(?, res[i])) matches
+      tagged DivPreStage .r: return r.done;
+      tagged DivPostStage .r: return r.res.done;
+    endcase
+  endfunction
+
+  function DivRes#(n) divResult(Integer i);
+    case (fromMaybe(?, res[i])) matches
+      tagged DivPreStage .r: return r;
+      // divResult is consumed only when divDone is true. In the post state,
+      // that means the pre-stage result was already final, so do not place an
+      // unnecessary divStepPost and its subtractors on the output path.
+      tagged DivPostStage .r: return r.res;
+    endcase
+  endfunction
+
   function Bool genVal(Integer i) = isValid(res[i]);
 
-  Vector#(DivStage, DivRes#(n)) stepped = genWith(genDiv);
+  Vector#(DivStage, DivState#(n)) stepped = genWith(genDiv);
   Vector#(DivStage, Bool) valid = genWith(genVal);
   Vector#(TAdd#(1, DivStage), Bool) notFull = ?;
   Integer divStage = valueOf(DivStage);
-  notFull[divStage] = out.notFull && fromMaybe(?, res[divStage-1]).done;
+  notFull[divStage] = out.notFull && divDone(divStage-1);
   for (Integer i = divStage - 1; i >= 0; i = i - 1)
     notFull[i] = notFull[i+1] || !valid[i];
 
   (* fire_when_enabled, no_implicit_conditions *)
   rule shift;
-    if (res[divStage-1] matches tagged Valid .r) begin
+    if (isValid(res[divStage-1])) begin
+      let r = divResult(divStage-1);
       match DivRes {done: .done, qneg: .qneg, rneg: .rneg, quot: .quot, rem: .rem} = r;
       if (out.notFull && done) out.enq(tuple2(qneg ? -quot : quot, rneg ? -rem : rem));
     end
@@ -301,9 +347,12 @@ module mkDivider#(DivStep#(n) step) (Divider#(n));
         res[i] <= valid[i-1] ? tagged Valid stepped[i-1] : tagged Invalid;
       else
         res[i] <= valid[i] ? tagged Valid stepped[i] : tagged Invalid;
-    if (notFull[0])
-      res[0] <= enqReq.wget;
-    else
+    if (notFull[0]) begin
+      if (enqReq.wget matches tagged Valid .r)
+        res[0] <= tagged Valid (tagged DivPreStage r);
+      else
+        res[0] <= tagged Invalid;
+    end else
       res[0] <= valid[0] ? tagged Valid stepped[0] : tagged Invalid;
   endrule
 
@@ -327,11 +376,14 @@ module mkDivider#(DivStep#(n) step) (Divider#(n));
 endmodule
 
 (* noinline *)
-function DivRes#(32) divStep32(DivRes#(32) x) = divStep(x);
+function DivPreRes#(32) divStepPre32(DivRes#(32) x) = divStepPre(x);
+
+(* noinline *)
+function DivRes#(32) divStepPost32(DivPreRes#(32) x) = divStepPost(x);
 
 (* synthesize *)
 module mkDiv32 (Divider#(32));
-  Divider#(32) d <- mkDivider(divStep32);
+  Divider#(32) d <- mkDivider(divStepPre32, divStepPost32);
   return d;
 endmodule
 

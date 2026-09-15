@@ -42,6 +42,357 @@ typedef struct {
 } MulAddInterIo#(numeric type expWidth, numeric type sigWidth)
   deriving (Bits, Eq);
 
+// State at the timing cut inside preMul. The first half decodes the recoded
+// operands and computes exponent alignment; the second performs the variable
+// alignment shift and sticky-bit reduction. Their composition is exactly the
+// original mulAddRawFN_preMul function below.
+typedef struct {
+  Bool isSigNaNAny;
+  Bool isNaNAOrB;
+  Bool isInfA;
+  Bool isZeroA;
+  Bool isInfB;
+  Bool isZeroB;
+  Bool signProd;
+  Bool isNaNC;
+  Bool isInfC;
+  Bool isZeroC;
+  Int#(TAdd#(2, expWidth)) sExpSum;
+  Bool doSubMags;
+  Bool cIsDominant;
+  Bit#(TLog#(MulAddSigSumWidth#(sigWidth))) cAlignDist;
+  Bit#(sigWidth) mulAddA;
+  Bit#(sigWidth) mulAddB;
+  Bit#(TAdd#(1, sigWidth)) rawCSig;
+} MulAddPreMulMid#(numeric type expWidth, numeric type sigWidth)
+  deriving (Bits, Eq);
+
+function MulAddPreMulMid#(expWidth, sigWidth)
+  mulAddRawFN_preMul_prepare(
+    Bit#(2) op,
+    RawFloat#(expWidth, sigWidth) rawA,
+    RawFloat#(expWidth, sigWidth) rawB,
+    RawFloat#(expWidth, sigWidth) rawC
+  )
+  provisos (
+    Add#(_3, TLog#(MulAddSigSumWidth#(sigWidth)), TAdd#(2, expWidth))
+  );
+    Integer eW = valueOf(expWidth);
+    Integer sW = valueOf(sigWidth);
+    Integer sigSumWidth = 3 * sW + 3;
+
+    Bool signProd = (rawA.sign != rawB.sign) != unpack(op[1]);
+    Int#(TAdd#(3, expWidth)) sExpAB =
+      signExtend(rawA.sExp) + signExtend(rawB.sExp);
+    Int#(TAdd#(4, expWidth)) sExpAlignedProd =
+      signExtend(sExpAB) + fromInteger(sW + 3 - (2 ** eW));
+    Bool doSubMags = (signProd != rawC.sign) != unpack(op[0]);
+
+    Int#(TAdd#(5, expWidth)) sNatCAlignDist =
+      signExtend(sExpAlignedProd) - signExtend(rawC.sExp);
+    Bit#(TAdd#(2, expWidth)) posNatCAlignDist =
+      pack(sNatCAlignDist)[eW + 1 : 0];
+    Bool isMinCAlign = rawA.isZero || rawB.isZero || (sNatCAlignDist < 0);
+    Bool cIsDominant =
+      !rawC.isZero && (isMinCAlign || (posNatCAlignDist <= fromInteger(sW)));
+
+    Int#(TAdd#(5, expWidth)) sExpAlignedProdMinusSig =
+      signExtend(sExpAlignedProd) - fromInteger(sW);
+    Int#(TAdd#(5, expWidth)) sExpSumWide =
+      cIsDominant ? signExtend(rawC.sExp) : sExpAlignedProdMinusSig;
+    Int#(TAdd#(2, expWidth)) sExpSum =
+      unpack(pack(sExpSumWide)[eW + 1 : 0]);
+
+    Bit#(TLog#(MulAddSigSumWidth#(sigWidth))) cAlignDist =
+      isMinCAlign ? 0 :
+        ((posNatCAlignDist < fromInteger(sigSumWidth - 1)) ?
+          truncate(posNatCAlignDist) : fromInteger(sigSumWidth - 1));
+
+    return MulAddPreMulMid {
+      isSigNaNAny: isSigNaNRawFloat(rawA) || isSigNaNRawFloat(rawB) ||
+                   isSigNaNRawFloat(rawC),
+      isNaNAOrB: rawA.isNaN || rawB.isNaN,
+      isInfA: rawA.isInf,
+      isZeroA: rawA.isZero,
+      isInfB: rawB.isInf,
+      isZeroB: rawB.isZero,
+      signProd: signProd,
+      isNaNC: rawC.isNaN,
+      isInfC: rawC.isInf,
+      isZeroC: rawC.isZero,
+      sExpSum: sExpSum,
+      doSubMags: doSubMags,
+      cIsDominant: cIsDominant,
+      cAlignDist: cAlignDist,
+      mulAddA: truncate(pack(rawA.sig)),
+      mulAddB: truncate(pack(rawB.sig)),
+      rawCSig: pack(rawC.sig)
+    };
+endfunction
+
+function Tuple4#(
+    Bit#(sigWidth), Bit#(sigWidth), Bit#(TAdd#(sigWidth, sigWidth)),
+    MulAddInterIo#(expWidth, sigWidth)
+  ) mulAddRawFN_preMul_finish(
+    MulAddPreMulMid#(expWidth, sigWidth) mid
+  )
+  provisos (
+    Add#(TLog#(TAdd#(1, sigWidth)), _5,
+         TLog#(MulAddSigSumWidth#(sigWidth)))
+  );
+    Integer sW = valueOf(sigWidth);
+    Integer sigSumWidth = 3 * sW + 3;
+
+    Bit#(TAdd#(1, sigWidth)) cSigOrInv =
+      mid.doSubMags ? ~mid.rawCSig : mid.rawCSig;
+    Bit#(TSub#(TAdd#(MulAddSigSumWidth#(sigWidth), 2), sigWidth)) cFillBits =
+      pack(replicate(mid.doSubMags));
+    Int#(TAdd#(MulAddSigSumWidth#(sigWidth), 3)) extComplSigC =
+      unpack({cSigOrInv, cFillBits});
+    Int#(TAdd#(MulAddSigSumWidth#(sigWidth), 3)) mainAlignedSigC =
+      extComplSigC >> mid.cAlignDist;
+
+    Integer cGrainAlign = (sigSumWidth - sW - 1) % 4;
+    Bit#(TAdd#(4, sigWidth)) cGrainAlignedSig =
+      zeroExtend(mid.rawCSig) << fromInteger(cGrainAlign);
+    Bit#(TDiv#(TAdd#(4, sigWidth), 4)) cReduced4Sig =
+      orReduceBy4(cGrainAlignedSig);
+    Integer cExtraMaskHi = (sigSumWidth - 1) / 4;
+    Integer cExtraMaskLo = (sigSumWidth - sW - 1) / 4;
+    Bit#(TDiv#(TAdd#(4, sigWidth), 4)) cExtraMask =
+      lowMask(mid.cAlignDist >> 2, cExtraMaskHi, cExtraMaskLo);
+    Bool reduced4CExtra = orR(cReduced4Sig & cExtraMask);
+
+    Bit#(MulAddSigSumWidth#(sigWidth)) mainAlignedSigCShifted3 =
+      pack(mainAlignedSigC)[sigSumWidth + 2 : 3];
+    Bool alignedSigCStickyBit = mid.doSubMags ?
+      (andR(pack(mainAlignedSigC)[2:0]) && !reduced4CExtra) :
+      (orR(pack(mainAlignedSigC)[2:0]) || reduced4CExtra);
+    Bit#(TAdd#(MulAddSigSumWidth#(sigWidth), 1)) alignedSigC =
+      {mainAlignedSigCShifted3, pack(alignedSigCStickyBit)};
+
+    Bit#(TAdd#(sigWidth, sigWidth)) mulAddC =
+      pack(alignedSigC)[2 * sW : 1];
+    Bit#(TAdd#(2, sigWidth)) highAlignedSigC =
+      pack(alignedSigC)[sigSumWidth - 1 : 2 * sW + 1];
+    Bit#(1) bit0AlignedSigC = pack(alignedSigC)[0];
+    Bit#(TLog#(TAdd#(1, sigWidth))) cDom_cAlignDist =
+      truncate(mid.cAlignDist);
+
+    MulAddInterIo#(expWidth, sigWidth) interIo = MulAddInterIo {
+      isSigNaNAny: mid.isSigNaNAny,
+      isNaNAOrB: mid.isNaNAOrB,
+      isInfA: mid.isInfA,
+      isZeroA: mid.isZeroA,
+      isInfB: mid.isInfB,
+      isZeroB: mid.isZeroB,
+      signProd: mid.signProd,
+      isNaNC: mid.isNaNC,
+      isInfC: mid.isInfC,
+      isZeroC: mid.isZeroC,
+      sExpSum: mid.sExpSum,
+      doSubMags: mid.doSubMags,
+      cIsDominant: mid.cIsDominant,
+      cDom_cAlignDist: cDom_cAlignDist,
+      highAlignedSigC: highAlignedSigC,
+      bit0AlignedSigC: bit0AlignedSigC
+    };
+
+    return tuple4(mid.mulAddA, mid.mulAddB, mulAddC, interIo);
+endfunction
+
+// State at the normalization cut inside postMul. The first half combines the
+// product and aligned addend and finds the cancellation distance. The second
+// half performs the variable normalization shifts and constructs RawFloat.
+typedef struct {
+  MulAddInterIo#(expWidth, sigWidth) interIo;
+  Bit#(3) roundingMode;
+  Bool cDomSign;
+  Int#(TAdd#(3, expWidth)) cDomSExp;
+  Bit#(TAdd#(2, TAdd#(sigWidth, sigWidth))) cDomAbsSigSum;
+  Bool cDomAbsSigSumExtra;
+  Bool notCDomSignSigSum;
+  Bit#(TAdd#(TAdd#(sigWidth, sigWidth), 4)) notCDomAbsSigSum;
+  Bit#(TAdd#(sigWidth, 2)) notCDomReduced2AbsSigSum;
+  Bit#(TLog#(TAdd#(sigWidth, 2))) notCDomNormDistReduced2;
+  Bit#(TAdd#(1, TLog#(TAdd#(sigWidth, 2)))) notCDomNearNormDist;
+  Int#(TAdd#(3, expWidth)) notCDomSExp;
+} MulAddPostMulMid#(numeric type expWidth, numeric type sigWidth)
+  deriving (Bits, Eq);
+
+function MulAddPostMulMid#(expWidth, sigWidth)
+  mulAddRawFN_postMul_prepare(
+    MulAddInterIo#(expWidth, sigWidth) interIo,
+    Bit#(TAdd#(TAdd#(sigWidth, sigWidth), 1)) mulAddResult,
+    Bit#(3) roundingMode
+  )
+  provisos (
+    Add#(TAdd#(1, TLog#(TAdd#(sigWidth, 2))), _6,
+         TAdd#(3, expWidth)),
+    Add#(sigWidth, 2,
+         TDiv#(TAdd#(TAdd#(sigWidth, sigWidth), 4), 2))
+  );
+    Integer sW = valueOf(sigWidth);
+    Integer sigSumWidth = 3 * sW + 3;
+
+    Bool signProd = interIo.signProd;
+    Bool doSubMags = interIo.doSubMags;
+    Int#(TAdd#(2, expWidth)) sExpSum = interIo.sExpSum;
+    Bit#(TAdd#(2, sigWidth)) highAlignedSigC = interIo.highAlignedSigC;
+    Bit#(1) bit0AlignedSigC = interIo.bit0AlignedSigC;
+    Bool opSignC = signProd != doSubMags;
+
+    Bit#(TAdd#(2, sigWidth)) sigSumHigh =
+      unpack(mulAddResult[2 * sW]) ?
+        (highAlignedSigC + 1) : highAlignedSigC;
+    Bit#(MulAddSigSumWidth#(sigWidth)) sigSum =
+      {sigSumHigh, mulAddResult[2 * sW - 1 : 0], bit0AlignedSigC};
+
+    Int#(TAdd#(3, expWidth)) cDomSExp =
+      signExtend(sExpSum) - (doSubMags ? 1 : 0);
+    Bit#(2) cDomAbsSigSumMidPart = highAlignedSigC[sW + 1 : sW];
+    Bit#(TSub#(TAdd#(sigWidth, sigWidth), 1)) cDomAbsSigSumLowPart =
+      sigSum[sigSumWidth - 3 : sW + 2];
+    Bit#(TAdd#(2, TAdd#(sigWidth, sigWidth))) cDomAbsSigSum =
+      doSubMags ?
+        ~sigSum[sigSumWidth - 1 : sW + 1] :
+        {1'b0, cDomAbsSigSumMidPart, cDomAbsSigSumLowPart};
+    Bit#(sigWidth) cDomAbsSigSumExtraSubSlice = sigSum[sW : 1];
+    Bit#(TAdd#(sigWidth, 1)) cDomAbsSigSumExtraAddSlice =
+      sigSum[sW + 1 : 1];
+    Bool cDomAbsSigSumExtra = doSubMags ?
+      orR(~cDomAbsSigSumExtraSubSlice) :
+      orR(cDomAbsSigSumExtraAddSlice);
+
+    Bool notCDomSignSigSum = unpack(sigSum[2 * sW + 3]);
+    Bit#(TAdd#(TAdd#(sigWidth, sigWidth), 3)) sigSumLow =
+      pack(sigSum)[2 * sW + 2 : 0];
+    Bit#(TAdd#(TAdd#(sigWidth, sigWidth), 4)) notCDomAbsSigSum =
+      notCDomSignSigSum ?
+        zeroExtend(~sigSumLow) :
+        (zeroExtend(sigSumLow) + zeroExtend(pack(doSubMags)));
+    Bit#(TAdd#(sigWidth, 2)) notCDomReduced2AbsSigSum =
+      orReduceBy2(notCDomAbsSigSum);
+    Bit#(TLog#(TAdd#(sigWidth, 2))) notCDomNormDistReduced2 =
+      countLeadingZeroes(notCDomReduced2AbsSigSum);
+    Bit#(TAdd#(1, TLog#(TAdd#(sigWidth, 2)))) notCDomNearNormDist =
+      {notCDomNormDistReduced2, 1'b0};
+    Int#(TAdd#(3, expWidth)) notCDomSExp =
+      signExtend(sExpSum) - unpack(zeroExtend(notCDomNearNormDist));
+
+    return MulAddPostMulMid {
+      interIo: interIo,
+      roundingMode: roundingMode,
+      cDomSign: opSignC,
+      cDomSExp: cDomSExp,
+      cDomAbsSigSum: cDomAbsSigSum,
+      cDomAbsSigSumExtra: cDomAbsSigSumExtra,
+      notCDomSignSigSum: notCDomSignSigSum,
+      notCDomAbsSigSum: notCDomAbsSigSum,
+      notCDomReduced2AbsSigSum: notCDomReduced2AbsSigSum,
+      notCDomNormDistReduced2: notCDomNormDistReduced2,
+      notCDomNearNormDist: notCDomNearNormDist,
+      notCDomSExp: notCDomSExp
+    };
+endfunction
+
+function Tuple2#(Bool, RawFloat#(expWidth, TAdd#(2, sigWidth)))
+  mulAddRawFN_postMul_finish(
+    MulAddPostMulMid#(expWidth, sigWidth) mid
+  )
+  provisos (
+    Add#(TAdd#(1, TLog#(TAdd#(sigWidth, 2))), _6,
+         TAdd#(3, expWidth)),
+    Add#(sigWidth, 2,
+         TDiv#(TAdd#(TAdd#(sigWidth, sigWidth), 4), 2))
+  );
+    Integer eW = valueOf(expWidth);
+    Integer sW = valueOf(sigWidth);
+
+    let interIo = mid.interIo;
+    Bool signProd = interIo.signProd;
+    Bool doSubMags = interIo.doSubMags;
+    Bool cIsDominant = interIo.cIsDominant;
+    Bool opSignC = signProd != doSubMags;
+    Bool roundingModeMin = mid.roundingMode == round_min;
+
+    Bit#(TAdd#(TAdd#(sigWidth, TAdd#(sigWidth, sigWidth)), 2)) cDomShiftContainer =
+      zeroExtend(mid.cDomAbsSigSum) << interIo.cDom_cAlignDist;
+    Bit#(TAdd#(sigWidth, 5)) cDomMainSig =
+      cDomShiftContainer[2 * sW + 1 : sW - 3];
+    Integer cDomShamt4 = (4 - ((sW + 1) % 4)) % 4;
+    Bit#(sigWidth) cDomAbsSigSumLow = mid.cDomAbsSigSum[sW - 1 : 0];
+    Bit#(TAdd#(sigWidth, 3)) cDomLow4Shifted =
+      zeroExtend(cDomAbsSigSumLow) << fromInteger(cDomShamt4);
+    Bit#(TDiv#(TAdd#(sigWidth, 3), 4)) cDomReduced4Sig =
+      orReduceBy4(cDomLow4Shifted);
+    Bit#(TDiv#(TAdd#(sigWidth, 3), 4)) cDomExtraMask =
+      lowMask(interIo.cDom_cAlignDist >> 2, 0, sW / 4);
+    Bool cDomReduced4SigExtra = orR(cDomReduced4Sig & cDomExtraMask);
+    Bool cDomStickyBit =
+      orR(cDomMainSig[2:0]) || cDomReduced4SigExtra ||
+      mid.cDomAbsSigSumExtra;
+    Bit#(TAdd#(sigWidth, 3)) cDomSig =
+      {cDomMainSig[sW + 4 : 3], pack(cDomStickyBit)};
+
+    Bit#(TAdd#(TAdd#(TAdd#(sigWidth, sigWidth), TAdd#(sigWidth, sigWidth)), 8))
+      notCDomShiftContainer =
+        zeroExtend(mid.notCDomAbsSigSum) << mid.notCDomNearNormDist;
+    Bit#(TAdd#(sigWidth, 5)) notCDomMainSig =
+      notCDomShiftContainer[2 * sW + 3 : sW - 1];
+    Integer notCDomShamt2 = (sW / 2) % 2;
+    Bit#(TAdd#(1, MulAddHalfSigWidth#(sigWidth)))
+      notCDomReduced2AbsSigSumLow =
+        mid.notCDomReduced2AbsSigSum[sW / 2 : 0];
+    Bit#(TAdd#(MulAddHalfSigWidth#(sigWidth), 2)) notCDomLow2Shifted =
+      zeroExtend(notCDomReduced2AbsSigSumLow) << fromInteger(notCDomShamt2);
+    Bit#(TDiv#(TAdd#(MulAddHalfSigWidth#(sigWidth), 2), 2))
+      notCDomReduced4Sig = orReduceBy2(notCDomLow2Shifted);
+    Bit#(TDiv#(TAdd#(MulAddHalfSigWidth#(sigWidth), 2), 2))
+      notCDomExtraMask = lowMask(
+        mid.notCDomNormDistReduced2 >> 1, 0, (sW + 2) / 4);
+    Bool notCDomReduced4SigExtra =
+      orR(notCDomReduced4Sig & notCDomExtraMask);
+    Bool notCDomStickyBit =
+      orR(notCDomMainSig[2:0]) || notCDomReduced4SigExtra;
+    Bit#(TAdd#(sigWidth, 3)) notCDomSig =
+      {notCDomMainSig[sW + 4 : 3], pack(notCDomStickyBit)};
+    Bit#(2) notCDomSigTopBits = pack(notCDomSig)[sW + 2 : sW + 1];
+    Bool notCDomCompleteCancellation = notCDomSigTopBits == 0;
+    Bool notCDomSign = notCDomCompleteCancellation ?
+      roundingModeMin : (signProd != mid.notCDomSignSigSum);
+
+    Bool notNaNIsInfProd = interIo.isInfA || interIo.isInfB;
+    Bool notNaNIsInfOut = notNaNIsInfProd || interIo.isInfC;
+    Bool notNaNAddZeros =
+      (interIo.isZeroA || interIo.isZeroB) && interIo.isZeroC;
+    Bool invalidExc =
+      interIo.isSigNaNAny ||
+      (interIo.isInfA && interIo.isZeroB) ||
+      (interIo.isZeroA && interIo.isInfB) ||
+      (!interIo.isNaNAOrB && (interIo.isInfA || interIo.isInfB) &&
+        interIo.isInfC && doSubMags);
+
+    RawFloat#(expWidth, TAdd#(2, sigWidth)) rawOut;
+    rawOut.isNaN = interIo.isNaNAOrB || interIo.isNaNC;
+    rawOut.isInf = notNaNIsInfOut;
+    rawOut.isZero =
+      notNaNAddZeros || (!cIsDominant && notCDomCompleteCancellation);
+    rawOut.sign =
+      (notNaNIsInfProd && signProd) ||
+      (interIo.isInfC && opSignC) ||
+      (notNaNAddZeros && !roundingModeMin && signProd && opSignC) ||
+      (notNaNAddZeros && roundingModeMin && (signProd || opSignC)) ||
+      (!notNaNIsInfOut && !notNaNAddZeros &&
+        (cIsDominant ? mid.cDomSign : notCDomSign));
+    Int#(TAdd#(3, expWidth)) sExpOutWide =
+      cIsDominant ? mid.cDomSExp : mid.notCDomSExp;
+    rawOut.sExp = unpack(pack(sExpOutWide)[eW + 1 : 0]);
+    rawOut.sig = unpack(cIsDominant ? cDomSig : notCDomSig);
+
+    return tuple2(invalidExc, rawOut);
+endfunction
+
 // Mirrors MulAddRecFNToRaw_preMul: unpacks operands, aligns C against the
 // A*B product, and produces the A*B multiplier inputs plus everything
 // postMul needs once the product is known.

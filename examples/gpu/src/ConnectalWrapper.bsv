@@ -50,7 +50,7 @@ endfunction
 
 interface Top_Pins;
 `ifndef SIMULATION
-  interface DDR4_Pins_Dual_VCU108 pins_ddr4;
+  interface DDR4_Pins_Single_VCU108 pins_ddr4;
 `endif
 endinterface
 
@@ -91,11 +91,11 @@ module mkConnectalWrapper#(HostInterface host, ConnectalProcIndication ind) (Con
   let ddrServer <- mkDDR4ServerSync(ddr4_ctrl_0.user, ddr4clk0, ddr4rstn0, curr_clk, curr_rst_n);
   let ddrInit <- mkMemInitDDR(ddrServer);
 
-  // DDR4 C2
-  let sys_clk2 = host.tsys_clk1_300mhz_buf;
-  let sys_rst2 <- mkAsyncResetFromCR(20, sys_clk2);
+//  // DDR4 C2
+//  let sys_clk2 = host.tsys_clk1_300mhz_buf;
+//  let sys_rst2 <- mkAsyncResetFromCR(20, sys_clk2);
 
-  DDR4_Controller_VCU108 ddr4_ctrl_1 <- mkDDR4Controller_VCU108(defaultValue, clocked_by sys_clk2, reset_by sys_rst2);
+//  DDR4_Controller_VCU108 ddr4_ctrl_1 <- mkDDR4Controller_VCU108(defaultValue, clocked_by sys_clk2, reset_by sys_rst2);
 
 //  Clock ddr4clk1 = ddr4_ctrl_1.user.clock;
 //  Reset ddr4rstn1 = ddr4_ctrl_1.user.reset_n;
@@ -261,9 +261,8 @@ module mkConnectalWrapper#(HostInterface host, ConnectalProcIndication ind) (Con
 
   interface Top_Pins pins;
 `ifndef SIMULATION
-    interface DDR4_Pins_Dual_VCU108 pins_ddr4;
+    interface DDR4_Pins_Single_VCU108 pins_ddr4;
       interface pins_c0 = ddr4_ctrl_0.ddr4;
-      interface pins_c1 = ddr4_ctrl_1.ddr4;
     endinterface
 `endif
   endinterface

@@ -24,7 +24,7 @@ CPPFILES += \
 	main.cpp
 
 # set main clock period
-CONNECTALFLAGS += --mainclockperiod=8
+CONNECTALFLAGS += --mainclockperiod=5
 
 # for DDR
 CONNECTALFLAGS += -D IMPORT_HOSTIF -D XILINX_SYS_CLK
@@ -38,6 +38,7 @@ SYNCFIFO_784_32 = $(CONNECTALDIR)/out/$(BOARD)/sync_bram_fifo_w784_d32/sync_bram
 SYNCFIFO_640_32 = $(CONNECTALDIR)/out/$(BOARD)/sync_bram_fifo_w640_d32/sync_bram_fifo_w640_d32.xci
 
 CONNECTALFLAGS += --xci $(SYNCFIFO_784_32) --xci $(SYNCFIFO_640_32)
+CONNECTALFLAGS += --implconstraint $(PLATFORMDIR)/xilinx/constraints/pcieclock-vcu108.xdc
 
 # compiler flags
 ifeq ($(OS),Darwin)
@@ -48,7 +49,9 @@ CONNECTALFLAGS += --bscflags " -steps-max-intervals 50 +RTS -K256M -RTS"
 CONNECTALFLAGS += --bscflags " -show-schedule"
 
 # gpu specific defines
-CONNECTALFLAGS += -D THREAD_NUM=4 -D WARP_NUM=16
+# LOG_BANK_NUM is b: RF-side structures contain 2^b banks.
+LOG_BANK_NUM ?= 2
+CONNECTALFLAGS += -D THREAD_NUM=4 -D WARP_NUM=16 -D LOG_BANK_NUM=$(LOG_BANK_NUM)
 
 ifeq ($(BOARD),vcu108)
 prebuild:: $(DDR4_V) $(SYNCFIFO_784_32) $(SYNCFIFO_640_32)

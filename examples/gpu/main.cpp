@@ -6,6 +6,7 @@
 #include <sys/un.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <pthread.h>
 #ifdef __APPLE__
 #include <sys/syslimits.h>
 #else
@@ -18,6 +19,14 @@
 using namespace std;
 
 static ConnectalProcRequestProxy *connectalProc = 0;
+static PortalPoller *poller = 0;
+
+// Body of the poller thread; PortalPoller::threadFn is public but its own
+// start() only creates a thread for an auto-started poller.
+static void *poller_worker(void *p) {
+  ((PortalPoller *)p)->threadFn(p);
+  return 0;
+}
 static const char *server_path = "./vx_socket.server";
 static int server_sock = -1;
 static int client_sock = -1;
@@ -49,8 +58,8 @@ public:
     uint64_t data_cast = data;
     safe_send(&data_cast, __LINE__);
   }
-  ConnectalProcIndication(unsigned int id)
-      : ConnectalProcIndicationWrapper(id) {}
+  ConnectalProcIndication(unsigned int id, PortalPoller *poller)
+      : ConnectalProcIndicationWrapper(id, poller) {}
 };
 
 static ConnectalProcIndication *ind = 0;
@@ -130,8 +139,21 @@ int main(int argc, char *const *argv) {
     exit(1);
   }
 
-  connectalProc = new ConnectalProcRequestProxy(IfcNames_ConnectalProcRequestS2H);
-  ind = new ConnectalProcIndication(IfcNames_ConnectalProcIndicationH2S);
+  // Both portals go on a poller whose thread is started only after they are
+  // fully constructed. The wrapper sends a TellState indication at reset; with
+  // the default (auto-started) poller that message could be dispatched to
+  // `ind` while its constructor was still running, i.e. before its vtable was
+  // installed, which crashed the host program at start-up.
+  poller = new PortalPoller(0);
+  connectalProc = new ConnectalProcRequestProxy(IfcNames_ConnectalProcRequestS2H, poller);
+  ind = new ConnectalProcIndication(IfcNames_ConnectalProcIndicationH2S, poller);
+  pthread_t poller_thread;
+  int poller_status = pthread_create(&poller_thread, NULL, poller_worker, poller);
+  if (poller_status != 0) {
+    fprintf(stderr, "SERVER: Failed to start poller thread: %s\n", strerror(poller_status));
+    exit(1);
+  }
+  sem_wait(&poller->sem_startup);
 
   uint64_t loaded = (uint64_t)-1;
   do {

@@ -87,7 +87,7 @@ typedef 98 Latency;
 
 (* synthesize *)
 module mkDMemoryRouter(DMemoryRouter#(ThreadNum));
-  Fifo#(1, MemoryRequest#(MemHeight, PhysDataSz)) reqs <- mkBypassFifo(True, True);
+  Fifo#(2, MemoryRequest#(MemHeight, PhysDataSz)) reqs <- mkCFFifo(True, True);
   Fifo#(Latency, MemoryResponse#(PhysDataSz)) resps <- mkBRAMFifo(False, False);
   Reg#(Bit#(Latency)) lat <- mkReg(0);
   PulseWire latEnq <- mkPulseWire;

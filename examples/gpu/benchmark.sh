@@ -174,7 +174,7 @@ metadata="$output_dir/metadata.txt"
   fi
   if command -v bsc >/dev/null 2>&1; then
     echo "bsc_version_begin"
-    bsc -version 2>&1 || true
+    bsc -v 2>&1 || true
     echo "bsc_version_end"
   fi
   echo "sha256_begin"

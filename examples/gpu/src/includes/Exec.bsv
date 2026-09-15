@@ -76,18 +76,12 @@ endinterface
 (* synthesize *)
 module mkVectorAlu(VectorAlu#(ThreadNum));
   Vector#(n, ScalarAlu) alus = replicate(alu);
-  FIFOF#(AluReq#(ThreadNum)) reqs <- mkBypassFIFOF;
-  FIFOF#(Vector#(ThreadNum, Data)) resps <- mkLFIFOF;
+  FIFOF#(Vector#(ThreadNum, Data)) resps <- mkFIFOF;
 
-  (* fire_when_enabled *)
-  rule compute_resp;
-    let r = reqs.first;
-    reqs.deq;
-    function Data app(ScalarAlu a, Data v1, Data v2) = a(v1, v2, r.f);
-    resps.enq(zipWith3(app, alus, r.v1, r.v2));
-  endrule
-
-  method Action enq(AluReq#(ThreadNum) req); reqs.enq(req); endmethod
+  method Action enq(AluReq#(ThreadNum) req);
+    function Data app(ScalarAlu a, Data v1, Data v2) = a(v1, v2, req.f);
+    resps.enq(zipWith3(app, alus, req.v1, req.v2));
+  endmethod
   method Bool notEmpty = resps.notEmpty;
   method Vector#(ThreadNum, Data) first = resps.first;
   method Action deq; resps.deq; endmethod
@@ -109,13 +103,22 @@ endinterface
 (* synthesize *)
 module mkVectorMul(VectorMul#(ThreadNum));
   Vector#(ThreadNum, Multiplier#(DataSz)) muls <- replicateM(mkMul32);
-  FIFOF#(MulReq#(ThreadNum)) reqs <- mkBypassFIFOF;
   Fifo#(5, Bool) respLower <- mkLatencyFifo(True, True);
-  FIFOF#(Vector#(ThreadNum, Data)) resps <- mkBypassFIFOF;
-  let req = reqs.notEmpty ? reqs.first : ?;
+  FIFOF#(Vector#(ThreadNum, Data)) resps <- mkFIFOF;
 
   (* fire_when_enabled *)
-  rule process_req(reqs.notEmpty); // relies on the fact that resps are promptly dequeued
+  rule compute_resp(respLower.notEmpty);
+    Vector#(ThreadNum, Data) res;
+    Bool lower = respLower.first; // take lower half
+    for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1) begin
+      res[i] = lower ? muls[i].first[31:0] : muls[i].first[63:32];
+      muls[i].deq;
+    end
+    resps.enq(res);
+    respLower.deq;
+  endrule
+
+  method Action enq(MulReq#(ThreadNum) req);
     Tuple2#(Bool, Bool) sign = case (req.f)
       2'b00: // MUL
         tuple2(True, True);
@@ -130,22 +133,7 @@ module mkVectorMul(VectorMul#(ThreadNum));
     for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1)
       muls[i].enq(tpl_1(sign), req.v1[i], tpl_2(sign), req.v2[i]);
     respLower.enq(lower);
-    reqs.deq;
-  endrule
-
-  (* fire_when_enabled *)
-  rule compute_resp(respLower.notEmpty);
-    Vector#(ThreadNum, Data) res;
-    Bool lower = respLower.first; // take lower half
-    for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1) begin
-      res[i] = lower ? muls[i].first[31:0] : muls[i].first[63:32];
-      muls[i].deq;
-    end
-    resps.enq(res);
-    respLower.deq;
-  endrule
-
-  method Action enq(MulReq#(ThreadNum) x); reqs.enq(x); endmethod
+  endmethod
   method Bool notEmpty = resps.notEmpty;
   method Vector#(ThreadNum, Data) first = resps.first;
   method Action deq; resps.deq; endmethod
@@ -167,20 +155,8 @@ endinterface
 (* synthesize *)
 module mkVectorDiv(VectorDiv#(ThreadNum));
   Vector#(ThreadNum, Divider#(32)) divs <- replicateM(mkDiv32);
-  FIFOF#(DivReq#(ThreadNum)) reqs <- mkBypassFIFOF;
   Fifo#(TAdd#(1, DivStage), Bool) respQuot <- mkLatencyFifo(True, True);
-  FIFOF#(Vector#(ThreadNum, Data)) resps <- mkBypassFIFOF;
-  let req = reqs.notEmpty ? reqs.first : ?;
-
-  (* fire_when_enabled *)
-  rule process_req(reqs.notEmpty);
-    Bool sign = !unpack(req.f[0]); // 1'b1 for divu/remu
-    Bool quot = !unpack(req.f[1]); // 1'b1 for rem/remu
-    for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1)
-      divs[i].enq(sign, req.v1[i], sign, req.v2[i]);
-    respQuot.enq(quot);
-    reqs.deq;
-  endrule
+  FIFOF#(Vector#(ThreadNum, Data)) resps <- mkFIFOF;
 
   (* fire_when_enabled *)
   rule compute_resp(respQuot.notEmpty);
@@ -196,7 +172,13 @@ module mkVectorDiv(VectorDiv#(ThreadNum));
     respQuot.deq;
   endrule
 
-  method Action enq(DivReq#(ThreadNum) x); reqs.enq(x); endmethod
+  method Action enq(DivReq#(ThreadNum) req);
+    Bool sign = !unpack(req.f[0]); // 1'b1 for divu/remu
+    Bool quot = !unpack(req.f[1]); // 1'b1 for rem/remu
+    for (Integer i = 0; i < valueOf(ThreadNum); i = i + 1)
+      divs[i].enq(sign, req.v1[i], sign, req.v2[i]);
+    respQuot.enq(quot);
+  endmethod
   method Bool notEmpty = resps.notEmpty;
   method Vector#(ThreadNum, Data) first = resps.first;
   method Action deq; resps.deq; endmethod
@@ -218,18 +200,12 @@ endinterface
 (* synthesize *)
 module mkVectorBru(VectorBru#(ThreadNum));
   Vector#(ThreadNum, ScalarBru) brus = replicate(bru);
-  FIFOF#(BruReq#(ThreadNum)) reqs <- mkBypassFIFOF;
-  FIFOF#(Vector#(ThreadNum, Bool)) resps <- mkLFIFOF;
+  FIFOF#(Vector#(ThreadNum, Bool)) resps <- mkFIFOF;
 
-  (* fire_when_enabled *)
-  rule compute_resp;
-    let r = reqs.first;
-    reqs.deq;
-    function Bool app(ScalarBru b, Data v1, Data v2) = b(v1, v2, r.f);
-    resps.enq(zipWith3(app, brus, r.v1, r.v2));
-  endrule
-
-  method Action enq(BruReq#(ThreadNum) x); reqs.enq(x); endmethod
+  method Action enq(BruReq#(ThreadNum) req);
+    function Bool app(ScalarBru b, Data v1, Data v2) = b(v1, v2, req.f);
+    resps.enq(zipWith3(app, brus, req.v1, req.v2));
+  endmethod
   method Bool notEmpty = resps.notEmpty;
   method Vector#(ThreadNum, Bool) first = resps.first;
   method Action deq; resps.deq; endmethod
