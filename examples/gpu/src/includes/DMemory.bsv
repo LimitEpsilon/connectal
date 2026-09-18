@@ -83,7 +83,11 @@ interface DMemoryRouter#(numeric type n);
   interface MemoryClient#(MemHeight, PhysDataSz) dMemClient;
 endinterface
 
+`ifdef SIMULATION
+typedef 120 Latency;
+`else
 typedef 98 Latency;
+`endif
 
 (* synthesize *)
 module mkDMemoryRouter(DMemoryRouter#(ThreadNum));

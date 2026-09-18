@@ -51,7 +51,7 @@ CONNECTALFLAGS += --bscflags " -show-schedule"
 # gpu specific defines
 # LOG_BANK_NUM is b: RF-side structures contain 2^b banks.
 LOG_BANK_NUM ?= 2
-CONNECTALFLAGS += -D THREAD_NUM=4 -D WARP_NUM=16 -D LOG_BANK_NUM=$(LOG_BANK_NUM)
+CONNECTALFLAGS += -D THREAD_NUM=4 -D WARP_NUM=8 -D LOG_BANK_NUM=$(LOG_BANK_NUM)
 
 ifeq ($(BOARD),vcu108)
 prebuild:: $(DDR4_V) $(SYNCFIFO_784_32) $(SYNCFIFO_640_32)

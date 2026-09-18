@@ -42,8 +42,30 @@ module mkOneWarpIn(MergeTree#(6, Warp));
   // Input 5 is the sequential PC+4 return. Its two-entry CReg queue permits a
   // dequeue and replacement enqueue in the same cycle while shortening the
   // instruction-memory response path.
-  let t <- mkMergeTreeWithLastPipeline(True);
-  return t;
+  MergeTree#(5, Warp) front <- mkMergeTree;
+  FIFOF#(Warp) frontReg <- mkFIFOF;
+  FIFOF#(Warp) last <- mkFIFOF;
+  Vector#(n, Put#(Warp)) inner;
+
+  for (Integer i = 0; i < 5; i = i + 1)
+    inner[i] =
+      interface Put;
+        method Action put(x) = front.iport[i].put(x);
+      endinterface;
+  inner[5] = toPut(last);
+
+  (* fire_when_enabled *)
+  rule fill;
+    frontReg.enq(front.first);
+    front.deq;
+  endrule
+
+  interface iport = inner;
+  method Action deq;
+    if (last.notEmpty) last.deq; else frontReg.deq;
+  endmethod
+  method first = last.notEmpty ? last.first : frontReg.first;
+  method Bool notEmpty = last.notEmpty || frontReg.notEmpty;
 endmodule
 
 function
@@ -52,11 +74,24 @@ function
 
 (* synthesize *)
 module mkWarps(Fifo#(MaxDivergence, Warp));
-  // Keep the oldest queued warp in a register while retaining BRAM storage
-  // for the divergence backlog. This preserves one dequeue per cycle and
-  // removes the warp BRAM from the instruction-memory request path.
-  let fifo <- mkFrontBRAMFifo(False, False);
-  return fifo;
+  FIFOF#(Warp) hd <- mkUGFIFOF;
+  Fifo#(MaxDivergence, Warp) tl <- mkBRAMFifo(False, False);
+
+  (* fire_when_enabled *)
+  rule refill(hd.notFull && tl.notEmpty);
+    hd.enq(tl.first);
+    tl.deq;
+  endrule
+
+  method notFull = tl.notFull;
+  method Action enq(Warp x) = tl.enq(x);
+  method notEmpty = hd.notEmpty;
+  method Action deq = hd.deq;
+  method first = hd.first;
+  method Action clear;
+    hd.clear;
+    tl.clear;
+  endmethod
 endmodule
 
 typedef Tuple2#(Vector#(ThreadNum, Data), EXCont) EXResult;
